@@ -33,7 +33,7 @@ class DelayHostBridge implements HostBridgeClient {
 }
 
 describe("SystemStatsService", () => {
-  it("starts with isAvailable = false until capability is verified by host response", async () => {
+  it("starts with isAvailable = false until capability is verified by host response with telemetry", async () => {
     const bridge = new DelayHostBridge();
     bridge.responses["system_stats.get"] = {
       status: "ok",
@@ -64,7 +64,7 @@ describe("SystemStatsService", () => {
     expect(bridge.calls[0].method).toBe("system_stats.get");
   });
 
-  it("handles initial CPU sample where cpu_percent is null", async () => {
+  it("preserves partial success where cpu_percent is null but memory is valid", async () => {
     const bridge = new DelayHostBridge();
     bridge.responses["system_stats.get"] = {
       status: "ok",
@@ -79,8 +79,50 @@ describe("SystemStatsService", () => {
     const service = new SystemStatsService(bridge, "win32");
     const stats = await service.getStats();
 
+    expect(stats.status).toBe("ok");
+    expect(stats.available).toBeTrue();
     expect(stats.cpu_percent).toBeNull();
     expect(stats.memory_percent).toBe(50.0);
+    expect(service.isAvailable).toBeTrue();
+  });
+
+  it("treats all-null responses as available = false and keeps isAvailable = false", async () => {
+    const bridge = new DelayHostBridge();
+    bridge.responses["system_stats.get"] = {
+      status: "ok",
+      available: true,
+      cpu_percent: null,
+      memory_percent: null,
+      memory_used_bytes: null,
+      memory_total_bytes: null,
+      gpu_percent: null,
+    };
+
+    const service = new SystemStatsService(bridge, "win32");
+    const stats = await service.getStats();
+
+    expect(stats.status).toBe("ok");
+    expect(stats.available).toBeFalse();
+    expect(service.isAvailable).toBeFalse();
+  });
+
+  it("handles status: ok with available: false by setting isAvailable = false", async () => {
+    const bridge = new DelayHostBridge();
+    bridge.responses["system_stats.get"] = {
+      status: "ok",
+      available: false,
+      cpu_percent: 10.0,
+      memory_percent: 40.0,
+      memory_used_bytes: 4000000000,
+      memory_total_bytes: 10000000000,
+      gpu_percent: null,
+    };
+
+    const service = new SystemStatsService(bridge, "win32");
+    const stats = await service.getStats();
+
+    expect(stats.available).toBeFalse();
+    expect(service.isAvailable).toBeFalse();
   });
 
   it("handles host bridge failure by resetting isAvailable to false and returning null metrics", async () => {

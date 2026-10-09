@@ -81,15 +81,25 @@ export class SystemStatsService {
         return fallback;
       }
 
-      this.isHostVerified = true;
+      const cpu = typeof rec.cpu_percent === "number" ? rec.cpu_percent : null;
+      const memPct = typeof rec.memory_percent === "number" ? rec.memory_percent : null;
+      const memUsed = typeof rec.memory_used_bytes === "number" ? rec.memory_used_bytes : null;
+      const memTotal = typeof rec.memory_total_bytes === "number" ? rec.memory_total_bytes : null;
+      const gpu = typeof rec.gpu_percent === "number" ? rec.gpu_percent : null;
+
+      const hasTelemetry = cpu !== null || memPct !== null || memUsed !== null || memTotal !== null || gpu !== null;
+      const available = rec.available === true && hasTelemetry;
+
+      this.isHostVerified = available;
+
       const stats: SystemStats = {
         status: "ok",
-        available: true,
-        cpu_percent: typeof rec.cpu_percent === "number" ? rec.cpu_percent : null,
-        memory_percent: typeof rec.memory_percent === "number" ? rec.memory_percent : null,
-        memory_used_bytes: typeof rec.memory_used_bytes === "number" ? rec.memory_used_bytes : null,
-        memory_total_bytes: typeof rec.memory_total_bytes === "number" ? rec.memory_total_bytes : null,
-        gpu_percent: typeof rec.gpu_percent === "number" ? rec.gpu_percent : null,
+        available,
+        cpu_percent: cpu,
+        memory_percent: memPct,
+        memory_used_bytes: memUsed,
+        memory_total_bytes: memTotal,
+        gpu_percent: gpu,
       };
 
       this.cache = {

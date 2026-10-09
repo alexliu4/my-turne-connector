@@ -47,9 +47,15 @@ impl WindowsSystemStatsState {
         if let Ok(guard) = self.cache.lock() {
             if let Some(ref cached) = *guard {
                 if cached.timestamp.elapsed().as_millis() < 1000 {
+                    let available = cached.cpu_percent.is_some()
+                        || cached.memory_percent.is_some()
+                        || cached.memory_used_bytes.is_some()
+                        || cached.memory_total_bytes.is_some()
+                        || cached.gpu_percent.is_some();
+
                     return serde_json::json!({
                         "status": "ok",
-                        "available": true,
+                        "available": available,
                         "cpu_percent": cached.cpu_percent,
                         "memory_percent": cached.memory_percent,
                         "memory_used_bytes": cached.memory_used_bytes,
@@ -76,9 +82,15 @@ impl WindowsSystemStatsState {
             *guard = Some(stats.clone());
         }
 
+        let available = stats.cpu_percent.is_some()
+            || stats.memory_percent.is_some()
+            || stats.memory_used_bytes.is_some()
+            || stats.memory_total_bytes.is_some()
+            || stats.gpu_percent.is_some();
+
         serde_json::json!({
             "status": "ok",
-            "available": true,
+            "available": available,
             "cpu_percent": stats.cpu_percent,
             "memory_percent": stats.memory_percent,
             "memory_used_bytes": stats.memory_used_bytes,
@@ -109,16 +121,12 @@ impl WindowsSystemStatsState {
             mem_status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
 
             let (mem_pct, mem_used, mem_total) = unsafe {
-                if GlobalMemoryStatusEx(&mut mem_status).is_ok() {
+                if GlobalMemoryStatusEx(&mut mem_status).is_ok() && mem_status.ullTotalPhys > 0 {
                     let total = mem_status.ullTotalPhys;
                     let avail = mem_status.ullAvailPhys;
                     let used = total.saturating_sub(avail);
-                    let pct = if total > 0 {
-                        Some(((used as f64 / total as f64) * 100.0 * 10.0).round() / 10.0)
-                    } else {
-                        Some(0.0)
-                    };
-                    (pct, Some(used), Some(total))
+                    let pct = ((used as f64 / total as f64) * 100.0 * 10.0).round() / 10.0;
+                    (Some(pct), Some(used), Some(total))
                 } else {
                     (None, None, None)
                 }
