@@ -39,6 +39,14 @@ The Connector distinguishes between **RPC calls** (request-response invocations)
 
 ## Volume Control & Event Flow
 
+`app.ready.capabilities` is a snapshot taken at handshake time. Initial volume
+discovery runs asynchronously on the existing shared host bridge, so `volume`
+remains false until a valid probe response, volume event, or volume RPC verifies
+support. Call the canonical `connector.capabilities` RPC to query current status;
+it returns `{ capabilities: { volume, media, discord, systemStats, macros, appLaunch } }`
+from cached state without another native-host probe. Media activation and volume
+support are independent, including when system media is disabled at startup.
+
 The master volume update flow is:
 
 ```text

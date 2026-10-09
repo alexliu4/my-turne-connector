@@ -1,4 +1,4 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { HostBridgeClient } from "../platform/host-bridge";
 import {
   mediaControlAction,
@@ -92,6 +92,75 @@ class MemoryPreferenceStore implements SystemMediaPreferenceStore {
 }
 
 describe("SystemMediaService", () => {
+  test("a late successful initial probe cannot overwrite a newer volume update", async () => {
+    let finishProbe!: (response: unknown) => void;
+    const pendingProbe = new Promise<unknown>((resolve) => { finishProbe = resolve; });
+    class StalledVolumeBridge extends FakeHostBridge {
+      async call<TResult = unknown>(method: string, params: unknown = {}): Promise<TResult> {
+        if (method === "media.get_volume") return await pendingProbe as TResult;
+        return super.call(method, params);
+      }
+    }
+    const host = new StalledVolumeBridge();
+    const sink = new RecordingSink();
+    const service = new SystemMediaService(host, sink, new MemoryPreferenceStore(false));
+    const refresh = spyOn(service as any, "refreshVolume");
+    try {
+      await service.start();
+      expect(service.isVolumeSupported).toBeFalse();
+      host.emit("device.volume.update", { volume_percent: 75, muted: true });
+      finishProbe({ volume_percent: 30, muted: false });
+      await refresh.mock.results[0]!.value;
+      await service.whenIdle();
+      expect(service.currentVolumePercent).toBe(75);
+      expect(service.currentMuted).toBeTrue();
+      expect(service.isVolumeSupported).toBeTrue();
+      expect(sink.deliveries).toEqual([{ kind: "volume", volumePercent: 75, muted: true }]);
+      await service.stop();
+    } finally {
+      finishProbe({ status: "unsupported" });
+      refresh.mockRestore();
+    }
+  });
+
+  for (const failure of ["unsupported", "error"] as const) {
+    test(`a late ${failure} probe preserves volume support recovered while media is disabled`, async () => {
+      let finishProbe!: (response: unknown) => void;
+      let failProbe!: (error: Error) => void;
+      const pendingProbe = new Promise<unknown>((resolve, reject) => {
+        finishProbe = resolve;
+        failProbe = reject;
+      });
+      class StalledVolumeBridge extends FakeHostBridge {
+        async call<TResult = unknown>(method: string, params: unknown = {}): Promise<TResult> {
+          if (method === "media.get_volume") return await pendingProbe as TResult;
+          if (method === "volume.get") return { volume_percent: 42, muted: false } as TResult;
+          return super.call(method, params);
+        }
+      }
+      const host = new StalledVolumeBridge();
+      const service = new SystemMediaService(host, new RecordingSink(), new MemoryPreferenceStore(false));
+      const refresh = spyOn(service as any, "refreshVolume");
+      try {
+        await service.start(); // Completes while the probe is still pending.
+        expect(service.isActive).toBeFalse();
+        expect(service.isVolumeSupported).toBeFalse();
+        host.emit("device.volume.update", { volume_percent: 35, muted: false });
+        expect(service.isVolumeSupported).toBeTrue();
+        expect(await service.getVolume()).toEqual({ volume_percent: 42, muted: false });
+        if (failure === "error") failProbe(new Error("Native probe failed"));
+        else finishProbe({ status: "unsupported" });
+        await refresh.mock.results[0]!.value;
+        expect(service.isVolumeSupported).toBeTrue();
+        expect(service.currentVolumePercent).toBe(42);
+        await service.stop();
+      } finally {
+        finishProbe({ status: "unsupported" });
+        refresh.mockRestore();
+      }
+    });
+  }
+
   test("supports getVolume, setVolume, adjustVolume, and toggleMute volume RPCs", async () => {
     class FakeVolumeHostBridge extends FakeHostBridge {
       vol = 40;
@@ -224,7 +293,7 @@ describe("SystemMediaService", () => {
 
       async call<TResult = unknown>(method: string, params: unknown = {}): Promise<TResult> {
         this.calls.push({ method, params });
-        if (method === "volume.get") {
+        if (method === "volume.get" || method === "media.get_volume") {
           return { volume_percent: this.vol, muted: this.muted } as TResult;
         } else if (method === "volume.set") {
           const p = params as { volume_percent: number };
@@ -242,6 +311,10 @@ describe("SystemMediaService", () => {
     await service.start();
 
     expect(service.isActive).toBeFalse(); // playback integration inactive
+    expect(service.isVolumeSupported).toBeTrue();
+    expect(service.currentVolumePercent).toBe(30);
+    expect(host.calls).toContainEqual({ method: "media.get_volume", params: {} });
+    expect(host.calls.some(({ method }) => method === "media.start")).toBeFalse();
 
     // Volume commands should still succeed!
     const setRes = await service.setVolume(60);
@@ -261,9 +334,9 @@ describe("SystemMediaService", () => {
     await service.whenIdle();
 
     expect(host.calls).toEqual([
+      { method: "media.get_volume", params: {} },
       { method: "media.set_spotify_linked", params: { linked: false } },
       { method: "media.start", params: {} },
-      { method: "media.get_volume", params: {} },
     ]);
     expect(service.currentVolumePercent).toBe(37);
     expect(sink.deliveries).toEqual([{ kind: "volume", volumePercent: 37 }]);
@@ -479,10 +552,9 @@ describe("SystemMediaService", () => {
     await service.setSystemMediaEnabled(true);
     expect(preferences.saved).toEqual([false, true]);
     expect(service.isActive).toBeTrue();
-    expect(host.calls.slice(-3)).toEqual([
+    expect(host.calls.slice(-2)).toEqual([
       { method: "media.set_spotify_linked", params: { linked: false } },
       { method: "media.start", params: {} },
-      { method: "media.get_volume", params: {} },
     ]);
     await service.stop();
   });
@@ -587,7 +659,10 @@ describe("SystemMediaService", () => {
     const service = new SystemMediaService(host, new RecordingSink(), preferences);
     await service.start();
     expect(service.isActive).toBeFalse();
-    expect(host.calls).toEqual([{ method: "media.stop", params: {} }]);
+    expect(host.calls).toEqual([
+      { method: "media.get_volume", params: {} },
+      { method: "media.stop", params: {} },
+    ]);
 
     await service.setForcedOn(true);
     expect(service.isForcedOn).toBeTrue();
@@ -634,6 +709,81 @@ describe("SystemMediaService", () => {
       method: "media.control",
       params: { action: "volume_up" },
     });
+    await service.stop();
+  });
+
+  test("defaults isVolumeSupported to false before verification and updates on volume events or RPCs", async () => {
+    class VolumeBridge extends FakeHostBridge {
+      async call<TResult = unknown>(method: string, params: unknown = {}): Promise<TResult> {
+        this.calls.push({ method, params });
+        if (method === "media.get_volume") return { status: "unsupported" } as TResult;
+        if (method === "volume.get") return { volume_percent: 50, muted: false } as TResult;
+        return super.call(method, params);
+      }
+    }
+
+    const host = new VolumeBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    // Initially unknown before verification
+    expect(service.isVolumeSupported).toBeFalse();
+
+    await service.start();
+    await service.whenIdle();
+    // Failed probe -> still false
+    expect(service.isVolumeSupported).toBeFalse();
+
+    // Successful volume RPC -> recovers to true
+    const res = await service.getVolume();
+    expect(res).toEqual({ volume_percent: 50, muted: false });
+    expect(service.isVolumeSupported).toBeTrue();
+
+    await service.stop();
+  });
+
+  test("recovers isVolumeSupported to true when a valid device.volume.update event arrives", async () => {
+    class UnsupportedVolumeBridge extends FakeHostBridge {
+      async call<TResult = unknown>(method: string, params: unknown = {}): Promise<TResult> {
+        this.calls.push({ method, params });
+        if (method === "media.get_volume" || method === "volume.get") {
+          return { status: "unsupported" } as TResult;
+        }
+        return super.call(method, params);
+      }
+    }
+
+    const host = new UnsupportedVolumeBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+    await service.start();
+    await service.whenIdle();
+
+    expect(service.isVolumeSupported).toBeFalse();
+
+    // Event arrives from host audio endpoint -> recovers to true!
+    host.emit("device.volume.update", { volume_percent: 65, muted: false });
+    expect(service.isVolumeSupported).toBeTrue();
+
+    await service.stop();
+  });
+
+  test("rethrows unexpected host bridge errors in getVolume while marking volumeSupported false", async () => {
+    class CrashingVolumeBridge extends FakeHostBridge {
+      async call<TResult = unknown>(method: string, params: unknown = {}): Promise<TResult> {
+        this.calls.push({ method, params });
+        if (method === "volume.get") {
+          throw new Error("Native pipe error");
+        }
+        return super.call(method, params);
+      }
+    }
+
+    const host = new CrashingVolumeBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+    await service.start();
+
+    await expect(service.getVolume()).rejects.toThrow("Native pipe error");
+    expect(service.isVolumeSupported).toBeFalse();
+
     await service.stop();
   });
 });

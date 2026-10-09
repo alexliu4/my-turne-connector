@@ -40,6 +40,15 @@ interface DeviceConnection {
   deviceInfo: DeviceInfo | null;
 }
 
+export interface ConnectorCapabilities {
+  volume: boolean;
+  media: boolean;
+  discord: boolean;
+  systemStats: boolean;
+  macros: boolean;
+  appLaunch: boolean;
+}
+
 export interface DeviceInfo {
   device: string;
   version: string;
@@ -465,6 +474,8 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       appReadyPayload.connectorPlatform = "windows";
     }
 
+    appReadyPayload.capabilities = this.getCapabilities();
+
     await this.broadcastToDevices("app.ready", appReadyPayload);
 
     await this.systemMediaService?.replayLatest();
@@ -585,6 +596,10 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
 
       if (method === "device.info") {
         return { result: { device: "nocturne-connector", version: getConnectorVersion() } };
+      }
+
+      if (method === "connector.capabilities") {
+        return { result: { capabilities: this.getCapabilities() } };
       }
 
       if (normalizedMethod === "spotify.auth.get_status") {
@@ -1228,6 +1243,19 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
 
   onConnectionStateChange(connected: boolean): void {
     this.broadcastToWebSocket("spotify.websocket.status", { connected });
+  }
+
+  getCapabilities(): ConnectorCapabilities {
+    const mediaActive = this.systemMediaService?.isActive ?? false;
+    const volumeSupported = this.systemMediaService?.isVolumeSupported ?? false;
+    return {
+      volume: volumeSupported,
+      media: mediaActive,
+      discord: false,
+      systemStats: false,
+      macros: false,
+      appLaunch: false,
+    };
   }
 
   getConnectionStatus(): { connected: boolean; deviceCount: number; devices: any[] } {

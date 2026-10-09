@@ -102,6 +102,8 @@ export class SystemMediaService {
   private forcedOn = false;
   private volumePercent: number | null = null;
   private muted: boolean | null = null;
+  private volumeSupported = false;
+  private volumeRevision = 0;
   private volumeUnsubscribe: (() => void) | null = null;
 
   constructor(
@@ -134,12 +136,18 @@ export class SystemMediaService {
     return this.active;
   }
 
+  get isVolumeSupported(): boolean {
+    return this.volumeSupported;
+  }
+
   async start(): Promise<void> {
     if (this.lifecycleStarted) return;
     this.lifecycleStarted = true;
     this.volumeUnsubscribe = this.hostBridge.onEvent("device.volume.update", (data) => {
       this.handleVolume(data);
     });
+    // Optional discovery uses the shared bridge and never gates Bluetooth startup.
+    void this.refreshVolume();
     await this.applyActivation();
   }
 
@@ -179,14 +187,28 @@ export class SystemMediaService {
   }
 
   async getVolume(): Promise<{ volume_percent: number; muted: boolean } | null> {
-    const response = await this.hostBridge.call<unknown>("volume.get", {});
+    let response: unknown;
+    try {
+      response = await this.hostBridge.call<unknown>("volume.get", {});
+    } catch (error) {
+      this.volumeSupported = false;
+      throw error;
+    }
     const rec = asRecord(response);
-    if (!rec || rec.status === "unsupported") return null;
+    if (!rec || rec.status === "unsupported") {
+      this.volumeSupported = false;
+      return null;
+    }
     const volume_percent = normalizeVolumePercent(rec.volume_percent ?? rec.volumePercent);
-    if (volume_percent === null) return null;
+    if (volume_percent === null) {
+      this.volumeSupported = false;
+      return null;
+    }
     const muted = typeof rec.muted === "boolean" ? rec.muted : false;
+    this.volumeRevision++;
     this.volumePercent = volume_percent;
     this.muted = muted;
+    this.volumeSupported = true;
     return { volume_percent, muted };
   }
 
@@ -198,14 +220,20 @@ export class SystemMediaService {
     const response = await this.hostBridge.call<unknown>("volume.set", { volume_percent: bounded });
     const rec = asRecord(response);
     const status = (rec?.status as string) ?? "unsupported";
-    if (status !== "ok") return { status };
+    if (status !== "ok") {
+      this.volumeSupported = false;
+      return { status };
+    }
     const volume_percent = normalizeVolumePercent(rec?.volume_percent ?? rec?.volumePercent);
     const muted = typeof rec?.muted === "boolean" ? rec.muted : undefined;
     if (volume_percent === null || muted === undefined) {
+      this.volumeSupported = false;
       return { status: "unsupported" };
     }
+    this.volumeRevision++;
     this.volumePercent = volume_percent;
     this.muted = muted;
+    this.volumeSupported = true;
     return { status: "ok", volume_percent, muted };
   }
 
@@ -216,14 +244,20 @@ export class SystemMediaService {
     const response = await this.hostBridge.call<unknown>("volume.adjust", { delta: Math.round(delta) });
     const rec = asRecord(response);
     const status = (rec?.status as string) ?? "unsupported";
-    if (status !== "ok") return { status };
+    if (status !== "ok") {
+      this.volumeSupported = false;
+      return { status };
+    }
     const volume_percent = normalizeVolumePercent(rec?.volume_percent ?? rec?.volumePercent);
     const muted = typeof rec?.muted === "boolean" ? rec.muted : undefined;
     if (volume_percent === null || muted === undefined) {
+      this.volumeSupported = false;
       return { status: "unsupported" };
     }
+    this.volumeRevision++;
     this.volumePercent = volume_percent;
     this.muted = muted;
+    this.volumeSupported = true;
     return { status: "ok", volume_percent, muted };
   }
 
@@ -238,14 +272,20 @@ export class SystemMediaService {
     const response = await this.hostBridge.call<unknown>("volume.toggleMute", params);
     const rec = asRecord(response);
     const status = (rec?.status as string) ?? "unsupported";
-    if (status !== "ok") return { status };
+    if (status !== "ok") {
+      this.volumeSupported = false;
+      return { status };
+    }
     const volume_percent = normalizeVolumePercent(rec?.volume_percent ?? rec?.volumePercent);
     const muted = typeof rec?.muted === "boolean" ? rec.muted : undefined;
     if (volume_percent === null || muted === undefined) {
+      this.volumeSupported = false;
       return { status: "unsupported" };
     }
+    this.volumeRevision++;
     this.volumePercent = volume_percent;
     this.muted = muted;
+    this.volumeSupported = true;
     return { status: "ok", volume_percent, muted };
   }
 
@@ -329,11 +369,6 @@ export class SystemMediaService {
       throw error;
     }
 
-    try {
-      await this.refreshVolume();
-    } catch (error) {
-      log.warn(`Initial host volume read failed: ${errorMessage(error)}`);
-    }
   }
 
   private async deactivate(
@@ -453,11 +488,17 @@ export class SystemMediaService {
 
   private handleVolume(data: unknown): void {
     const rec = asRecord(data);
+    if (rec?.status === "unsupported") {
+      this.volumeSupported = false;
+      return;
+    }
     const percent = normalizeVolumePercent(
       rec?.volume_percent ?? rec?.volumePercent,
     );
     const muted = typeof rec?.muted === "boolean" ? rec.muted : undefined;
     if (percent === null) return;
+    this.volumeRevision++;
+    this.volumeSupported = true;
     if (percent === this.volumePercent && muted === this.muted) return;
     this.volumePercent = percent;
     if (muted !== undefined) {
@@ -467,8 +508,20 @@ export class SystemMediaService {
   }
 
   private async refreshVolume(): Promise<void> {
-    const response = await this.hostBridge.call<unknown>("media.get_volume", {});
-    this.handleVolume(response);
+    const revision = this.volumeRevision;
+    try {
+      const response = await this.hostBridge.call<unknown>("media.get_volume", {});
+      const rec = asRecord(response);
+      if (rec?.status === "unsupported") {
+        return;
+      }
+      // A newer successful event or RPC owns the cached state, even if unchanged.
+      if (this.lifecycleStarted && this.volumeRevision === revision) {
+        this.handleVolume(response);
+      }
+    } catch {
+      // Keep any capability already verified by a newer volume event or RPC.
+    }
   }
 
   private trackDelivery(delivery: Promise<void>, description: string): void {
