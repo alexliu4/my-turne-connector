@@ -463,3 +463,15 @@ describe("Car Thing OTA request parameters", () => {
     });
   });
 });
+
+
+test("Discord absent responses consistently report unknown mute state", async () => {
+  const { NocturneManager } = await import("./nocturne-manager");
+  const manager = new NocturneManager({ platform: "linux", bluetoothService: fakeBluetoothService });
+  for (const method of ["discord.get_status", "discord.get_state", "discord.toggle_mute", "discord.toggleMute", "discord.toggle_deafen", "discord.toggleDeafen", "discord.set_mute", "discord.set_deafen"]) {
+    expect(await manager.onCall("absent", method, {})).toEqual({ result: {
+      status: "unsupported", available: false, running: false,
+      state_known: false, muted: null, deafened: null,
+    } });
+  }
+});

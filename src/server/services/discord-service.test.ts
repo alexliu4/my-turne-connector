@@ -1,6 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import type { Socket } from "node:net";
 import { DiscordService } from "./discord-service";
-import type { HostBridgeCallOptions, HostBridgeClient } from "../platform/host-bridge";
+import { HostBridge, type HostBridgeCallOptions, type HostBridgeClient } from "../platform/host-bridge";
 
 class FakeHostBridge implements HostBridgeClient {
   readonly calls: Array<{ method: string; params: unknown }> = [];
@@ -160,4 +161,67 @@ describe("DiscordService", () => {
     expect(muteRes.status).toBe("unsupported");
     expect(muteRes.muted).toBeNull();
   });
+});
+
+
+it.each(["toggleMute", "toggleDeafen"] as const)("does not dispatch expired %s after the shared connection eventually resolves", async (toggle) => {
+  const bridge = new HostBridge("delayed-test-pipe", "secret");
+  let connect!: (socket: Socket) => void;
+  const connection = new Promise<Socket>((resolve) => { connect = resolve; });
+  const writes: Buffer[] = [];
+  const socket = {
+    destroyed: false,
+    write(data: Buffer, callback: () => void) { writes.push(data); callback(); },
+    destroy() {},
+  } as unknown as Socket;
+  const internals = bridge as unknown as {
+    ensureConnected(): Promise<Socket>;
+    socket: Socket | null;
+  };
+  internals.ensureConnected = () => connection;
+  let expire!: () => void;
+  const originalSetTimeout = globalThis.setTimeout;
+  const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((callback: () => void, delay: number) => {
+    if (delay === 2_000) expire = callback;
+    return originalSetTimeout(callback, 60_000);
+  }) as typeof setTimeout);
+  try {
+    const result = new DiscordService(bridge)[toggle]();
+    expire();
+    expect(await result).toMatchObject({ status: "unknown", state_known: false, muted: null, deafened: null });
+    internals.socket = socket;
+    connect(socket);
+    await connection;
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writes).toHaveLength(0);
+    // Cancellation belongs to the request, so the shared connection stays usable.
+    timerSpy.mockRestore();
+    const nextCall = bridge.call("discord.get_status");
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(writes).toHaveLength(1);
+    bridge.close();
+    await expect(nextCall).rejects.toThrow("closed");
+  } finally {
+    timerSpy.mockRestore();
+    bridge.close();
+  }
+});
+
+
+it.each(["toggleMute", "toggleDeafen"] as const)("reports an uncertain %s outcome without discarding verified availability", async (toggle) => {
+  const bridge = new FakeHostBridge();
+  bridge.responses["discord.get_status"] = { status: "ok", running: true };
+  const service = new DiscordService(bridge);
+  await service.getStatus();
+  // A transport error cannot establish whether the host already executed the command.
+  const result = await service[toggle]();
+  expect(result).toMatchObject({
+    status: "unknown", available: true, running: true,
+    state_known: false, muted: null, deafened: null,
+  });
+  expect(result.message).toContain("may have executed");
+  expect(service.isAvailable).toBeTrue();
 });

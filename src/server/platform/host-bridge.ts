@@ -15,6 +15,7 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 export interface HostBridgeCallOptions {
   timeoutMs?: number;
   priority?: boolean;
+  signal?: AbortSignal;
 }
 
 export interface HostBridgeClient {
@@ -77,7 +78,9 @@ export class HostBridge implements HostBridgeClient {
         options.timeoutMs ?? DEFAULT_TIMEOUT_MS,
       );
     }
+    options.signal?.throwIfAborted();
     const socket = await this.ensureConnected();
+    options.signal?.throwIfAborted();
     const id = this.allocateRequestId();
     const key = String(id);
     const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -90,6 +93,7 @@ export class HostBridge implements HostBridgeClient {
       params,
     };
 
+    let onAbort: (() => void) | undefined;
     return new Promise<TResult>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(key);
@@ -102,13 +106,24 @@ export class HostBridge implements HostBridgeClient {
         timeout,
       });
 
-      this.enqueueWrite(socket, frame(request)).catch((error) => {
+      onAbort = () => {
+        const pending = this.pending.get(key);
+        if (!pending) return;
+        this.pending.delete(key);
+        clearTimeout(pending.timeout);
+        pending.reject(new HostBridgeError(`Host request ${method} cancelled; outcome unknown if already dispatched`, "cancelled"));
+      };
+      options.signal?.addEventListener("abort", onAbort, { once: true });
+
+      this.enqueueWrite(socket, frame(request), () => this.pending.has(key) && !options.signal?.aborted).catch((error) => {
         const pending = this.pending.get(key);
         if (!pending) return;
         this.pending.delete(key);
         clearTimeout(pending.timeout);
         pending.reject(asError(error, `Host request ${method} write failed`));
       });
+    }).finally(() => {
+      if (onAbort) options.signal?.removeEventListener("abort", onAbort);
     });
   }
 
@@ -194,12 +209,16 @@ export class HostBridge implements HostBridgeClient {
     return this.connectPromise;
   }
 
-  private enqueueWrite(socket: Socket, data: Buffer): Promise<void> {
+  private enqueueWrite(socket: Socket, data: Buffer, canDispatch: () => boolean = () => true): Promise<void> {
     const write = this.writeTail
       .catch(() => undefined)
       .then(
         () =>
           new Promise<void>((resolve, reject) => {
+            if (!canDispatch()) {
+              reject(new HostBridgeError("Host request expired before dispatch", "cancelled"));
+              return;
+            }
             if (this.socket !== socket || socket.destroyed) {
               reject(new HostBridgeError("Native host connection changed before write", "disconnected"));
               return;

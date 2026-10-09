@@ -116,14 +116,14 @@ export class DiscordService {
       };
     } catch (error) {
       log.warn(`discord.toggle_mute call failed: ${errorMessage(error)}`);
-      this.isRunning = false;
       return {
-        status: "unsupported",
-        available: false,
-        running: false,
+        status: "unknown",
+        available: this.isRunning,
+        running: this.isRunning,
         state_known: false,
         muted: null,
         deafened: null,
+        message: "Command outcome unknown; it may have executed. Check Discord before retrying.",
       };
     }
   }
@@ -158,14 +158,14 @@ export class DiscordService {
       };
     } catch (error) {
       log.warn(`discord.toggle_deafen call failed: ${errorMessage(error)}`);
-      this.isRunning = false;
       return {
-        status: "unsupported",
-        available: false,
-        running: false,
+        status: "unknown",
+        available: this.isRunning,
+        running: this.isRunning,
         state_known: false,
         muted: null,
         deafened: null,
+        message: "Command outcome unknown; it may have executed. Check Discord before retrying.",
       };
     }
   }
@@ -239,15 +239,17 @@ export class DiscordService {
   }
 
   private callHostWithTimeout(method: string, params: unknown): Promise<unknown> {
+    const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(() => {
+        controller.abort();
         reject(new Error(`Discord RPC ${method} timed out after ${DISCORD_RPC_TIMEOUT_MS}ms`));
       }, DISCORD_RPC_TIMEOUT_MS);
     });
 
     return Promise.race([
-      this.hostBridge.call(method, params, { timeoutMs: DISCORD_RPC_TIMEOUT_MS }),
+      this.hostBridge.call(method, params, { timeoutMs: DISCORD_RPC_TIMEOUT_MS, signal: controller.signal }),
       timeoutPromise,
     ]).finally(() => {
       if (timer) clearTimeout(timer);

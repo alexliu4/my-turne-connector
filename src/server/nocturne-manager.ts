@@ -650,25 +650,25 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       }
 
       if (method === "discord.get_status" || method === "discord.get_state") {
-        if (!this.discordService) return { result: { status: "unsupported", available: false, running: false, muted: false, deafened: false } };
+        if (!this.discordService) return { result: { status: "unsupported", available: false, running: false, state_known: false, muted: null, deafened: null } };
         const res = await this.discordService.getStatus();
         return { result: res };
       }
 
       if (method === "discord.toggle_mute" || method === "discord.toggleMute") {
-        if (!this.discordService) return { result: { status: "unsupported", available: false, running: false, muted: false, deafened: false } };
+        if (!this.discordService) return { result: { status: "unsupported", available: false, running: false, state_known: false, muted: null, deafened: null } };
         const res = await this.discordService.toggleMute();
         return { result: res };
       }
 
       if (method === "discord.toggle_deafen" || method === "discord.toggleDeafen") {
-        if (!this.discordService) return { result: { status: "unsupported", available: false, running: false, muted: false, deafened: false } };
+        if (!this.discordService) return { result: { status: "unsupported", available: false, running: false, state_known: false, muted: null, deafened: null } };
         const res = await this.discordService.toggleDeafen();
         return { result: res };
       }
 
       if (method === "discord.set_mute") {
-        if (!this.discordService) return { result: { status: "unsupported", available: false, running: false, muted: false, deafened: false } };
+        if (!this.discordService) return { result: { status: "unsupported", available: false, running: false, state_known: false, muted: null, deafened: null } };
         const muted = p.muted;
         if (typeof muted !== "boolean") return { result: { status: "unsupported" } };
         const res = await this.discordService.setMute(muted);
@@ -676,7 +676,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       }
 
       if (method === "discord.set_deafen") {
-        if (!this.discordService) return { result: { status: "unsupported", available: false, running: false, muted: false, deafened: false } };
+        if (!this.discordService) return { result: { status: "unsupported", available: false, running: false, state_known: false, muted: null, deafened: null } };
         const deafened = p.deafened;
         if (typeof deafened !== "boolean") return { result: { status: "unsupported" } };
         const res = await this.discordService.setDeafen(deafened);
