@@ -123,6 +123,59 @@ describe("SystemMediaService", () => {
     }
   });
 
+  for (const source of ["event", "get", "set", "adjust", "toggleMute", "invalid"] as const) {
+    test(`a late successful initial probe respects newer volume ${source} inputs`, async () => {
+      let finishProbe!: (response: unknown) => void;
+      const pendingProbe = new Promise<unknown>((resolve) => { finishProbe = resolve; });
+      class StalledVolumeBridge extends FakeHostBridge {
+        async call<TResult = unknown>(method: string, params: unknown = {}): Promise<TResult> {
+          if (method === "media.get_volume") return await pendingProbe as TResult;
+          if (method.startsWith("volume.")) return { status: "unsupported" } as TResult;
+          return super.call(method, params);
+        }
+      }
+      const host = new StalledVolumeBridge();
+      const sink = new RecordingSink();
+      const service = new SystemMediaService(host, sink, new MemoryPreferenceStore(false));
+      const refresh = spyOn(service as any, "refreshVolume");
+      try {
+        await service.start(); // Volume discovery must not delay startup.
+        if (source === "event") host.emit("device.volume.update", { status: "unsupported" });
+        else if (source === "get") expect(await service.getVolume()).toBeNull();
+        else if (source === "set") expect(await service.setVolume(50)).toEqual({ status: "unsupported" });
+        else if (source === "adjust") expect(await service.adjustVolume(10)).toEqual({ status: "unsupported" });
+        else if (source === "toggleMute") expect(await service.toggleMute()).toEqual({ status: "unsupported" });
+        else {
+          host.emit("device.volume.update", { volume_percent: "invalid" });
+          expect(await service.setVolume(NaN)).toEqual({ status: "unsupported" });
+          expect(await service.adjustVolume(Infinity)).toEqual({ status: "unsupported" });
+          expect(await service.toggleMute("yes" as any)).toEqual({ status: "unsupported" });
+          expect(await service.handleControl("unrelated")).toBeNull();
+          expect(host.calls.some(({ method }) => method.startsWith("volume."))).toBeFalse();
+        }
+        expect(service.isVolumeSupported).toBeFalse();
+        finishProbe({ volume_percent: 30, muted: false });
+        await refresh.mock.results[0]!.value;
+        await service.whenIdle();
+        if (source === "invalid") {
+          expect(service.isVolumeSupported).toBeTrue();
+          expect(service.currentVolumePercent).toBe(30);
+          expect(service.currentMuted).toBeFalse();
+          expect(sink.deliveries).toEqual([{ kind: "volume", volumePercent: 30, muted: false }]);
+        } else {
+          expect(service.isVolumeSupported).toBeFalse();
+          expect(service.currentVolumePercent).toBeNull();
+          expect(service.currentMuted).toBeNull();
+          expect(sink.deliveries).toEqual([]);
+        }
+        await service.stop();
+      } finally {
+        finishProbe({ status: "unsupported" });
+        refresh.mockRestore();
+      }
+    });
+  }
+
   for (const failure of ["unsupported", "error"] as const) {
     test(`a late ${failure} probe preserves volume support recovered while media is disabled`, async () => {
       let finishProbe!: (response: unknown) => void;
