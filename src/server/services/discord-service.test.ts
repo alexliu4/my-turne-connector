@@ -26,14 +26,44 @@ class FakeHostBridge implements HostBridgeClient {
 }
 
 describe("DiscordService", () => {
-  it("queries getStatus and formats response", async () => {
+  it("queries getStatus and reports running state without fabricating boolean mute state", async () => {
     const bridge = new FakeHostBridge();
     bridge.responses["discord.get_status"] = {
       status: "ok",
       available: true,
       running: true,
-      muted: false,
-      deafened: true,
+      state_known: false,
+      muted: null,
+      deafened: null,
+    };
+
+    const service = new DiscordService(bridge);
+    expect(service.isAvailable).toBeFalse();
+
+    const res = await service.getStatus();
+
+    expect(res).toEqual({
+      status: "ok",
+      available: true,
+      running: true,
+      state_known: false,
+      muted: null,
+      deafened: null,
+    });
+    expect(service.isAvailable).toBeTrue();
+    expect(bridge.calls).toHaveLength(1);
+    expect(bridge.calls[0].method).toBe("discord.get_status");
+  });
+
+  it("handles unavailable Discord when process is not running", async () => {
+    const bridge = new FakeHostBridge();
+    bridge.responses["discord.get_status"] = {
+      status: "ok",
+      available: false,
+      running: false,
+      state_known: false,
+      muted: null,
+      deafened: null,
     };
 
     const service = new DiscordService(bridge);
@@ -41,16 +71,16 @@ describe("DiscordService", () => {
 
     expect(res).toEqual({
       status: "ok",
-      available: true,
-      running: true,
-      muted: false,
-      deafened: true,
+      available: false,
+      running: false,
+      state_known: false,
+      muted: null,
+      deafened: null,
     });
-    expect(bridge.calls).toHaveLength(1);
-    expect(bridge.calls[0].method).toBe("discord.get_status");
+    expect(service.isAvailable).toBeFalse();
   });
 
-  it("handles bridge error gracefully in getStatus", async () => {
+  it("handles bridge errors gracefully without throwing", async () => {
     const bridge = new FakeHostBridge();
     const service = new DiscordService(bridge);
 
@@ -60,24 +90,32 @@ describe("DiscordService", () => {
       status: "unsupported",
       available: false,
       running: false,
-      muted: false,
-      deafened: false,
+      state_known: false,
+      muted: null,
+      deafened: null,
     });
+    expect(service.isAvailable).toBeFalse();
   });
 
-  it("handles toggleMute and toggleDeafen", async () => {
+  it("handles toggleMute and toggleDeafen when Discord is running", async () => {
     const bridge = new FakeHostBridge();
     bridge.responses["discord.toggle_mute"] = {
       status: "ok",
       running: true,
-      muted: true,
-      deafened: false,
+      available: true,
+      action: "toggled_mute",
+      state_known: false,
+      muted: null,
+      deafened: null,
     };
     bridge.responses["discord.toggle_deafen"] = {
       status: "ok",
       running: true,
-      muted: true,
-      deafened: true,
+      available: true,
+      action: "toggled_deafen",
+      state_known: false,
+      muted: null,
+      deafened: null,
     };
 
     const service = new DiscordService(bridge);
@@ -86,42 +124,40 @@ describe("DiscordService", () => {
       status: "ok",
       available: true,
       running: true,
-      muted: true,
-      deafened: false,
+      action: "toggled_mute",
+      state_known: false,
+      muted: null,
+      deafened: null,
     });
+    expect(service.isAvailable).toBeTrue();
 
     const deafenRes = await service.toggleDeafen();
     expect(deafenRes).toEqual({
       status: "ok",
       available: true,
       running: true,
-      muted: true,
-      deafened: true,
+      action: "toggled_deafen",
+      state_known: false,
+      muted: null,
+      deafened: null,
     });
   });
 
-  it("handles setMute and setDeafen", async () => {
+  it("rejects unverified setMute and setDeafen with unsupported", async () => {
     const bridge = new FakeHostBridge();
     bridge.responses["discord.set_mute"] = {
-      status: "ok",
+      status: "unsupported",
+      message: "Idempotent set_mute/set_deafen requires verified Discord state; use toggle_mute or toggle_deafen instead",
       running: true,
-      muted: true,
-      deafened: false,
-    };
-    bridge.responses["discord.set_deafen"] = {
-      status: "ok",
-      running: true,
-      muted: true,
-      deafened: false,
+      available: true,
+      state_known: false,
+      muted: null,
+      deafened: null,
     };
 
     const service = new DiscordService(bridge);
     const muteRes = await service.setMute(true);
-    expect(muteRes.muted).toBe(true);
-    expect(bridge.calls[0].params).toEqual({ muted: true });
-
-    const deafenRes = await service.setDeafen(false);
-    expect(deafenRes.deafened).toBe(false);
-    expect(bridge.calls[1].params).toEqual({ deafened: false });
+    expect(muteRes.status).toBe("unsupported");
+    expect(muteRes.muted).toBeNull();
   });
 });

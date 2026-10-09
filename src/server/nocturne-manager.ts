@@ -217,6 +217,13 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         log.warn(`System media initialization failed: ${errorMessage(err)}`);
       }
     }
+    if (this.discordService) {
+      try {
+        await this.discordService.start();
+      } catch (err) {
+        log.warn(`Discord service initialization failed: ${errorMessage(err)}`);
+      }
+    }
     await this.bluetoothService.initialize();
 
     this.bluetoothService.rfcommServer.setDataHandler((devicePath, data) => {
@@ -1287,7 +1294,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
   getCapabilities(): ConnectorCapabilities {
     const mediaActive = this.systemMediaService?.isActive ?? false;
     const volumeSupported = this.systemMediaService?.isVolumeSupported ?? false;
-    const discordSupported = this.discordService !== null;
+    const discordSupported = this.discordService?.isAvailable ?? false;
     return {
       volume: volumeSupported,
       media: mediaActive,

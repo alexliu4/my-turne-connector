@@ -7,41 +7,68 @@ export interface DiscordStatus {
   status: string;
   available: boolean;
   running: boolean;
-  muted: boolean;
-  deafened: boolean;
+  state_known: boolean;
+  muted: boolean | null;
+  deafened: boolean | null;
+  action?: string;
+  message?: string;
 }
 
 export class DiscordService {
+  private isRunning = false;
+
   constructor(private readonly hostBridge: HostBridgeClient) {}
+
+  get isAvailable(): boolean {
+    return this.isRunning;
+  }
+
+  async start(): Promise<void> {
+    await this.refreshStatus();
+  }
+
+  async refreshStatus(): Promise<boolean> {
+    const status = await this.getStatus();
+    return status.running;
+  }
 
   async getStatus(): Promise<DiscordStatus> {
     try {
       const response = await this.hostBridge.call<unknown>("discord.get_status", {});
       const rec = asRecord(response);
+      const running = rec?.running === true || rec?.available === true;
+      this.isRunning = running;
+
       if (!rec || rec.status !== "ok") {
         return {
           status: (rec?.status as string) ?? "unsupported",
-          available: false,
-          running: false,
-          muted: false,
-          deafened: false,
+          available: running,
+          running,
+          state_known: false,
+          muted: null,
+          deafened: null,
+          message: typeof rec?.message === "string" ? rec.message : undefined,
         };
       }
+
       return {
         status: "ok",
-        available: rec.available === true || rec.running === true,
-        running: rec.running === true || rec.available === true,
-        muted: rec.muted === true,
-        deafened: rec.deafened === true,
+        available: running,
+        running,
+        state_known: false,
+        muted: null,
+        deafened: null,
       };
     } catch (error) {
       log.warn(`discord.get_status call failed: ${errorMessage(error)}`);
+      this.isRunning = false;
       return {
         status: "unsupported",
         available: false,
         running: false,
-        muted: false,
-        deafened: false,
+        state_known: false,
+        muted: null,
+        deafened: null,
       };
     }
   }
@@ -50,30 +77,40 @@ export class DiscordService {
     try {
       const response = await this.hostBridge.call<unknown>("discord.toggle_mute", {});
       const rec = asRecord(response);
+      const running = rec?.running === true || rec?.available === true;
+      this.isRunning = running;
+
       if (!rec || rec.status !== "ok") {
         return {
           status: (rec?.status as string) ?? "unsupported",
-          available: rec?.running === true,
-          running: rec?.running === true,
-          muted: false,
-          deafened: false,
+          available: running,
+          running,
+          state_known: false,
+          muted: null,
+          deafened: null,
+          message: typeof rec?.message === "string" ? rec.message : undefined,
         };
       }
+
       return {
         status: "ok",
         available: true,
         running: true,
-        muted: rec.muted === true,
-        deafened: rec.deafened === true,
+        state_known: false,
+        muted: null,
+        deafened: null,
+        action: typeof rec.action === "string" ? rec.action : "toggled_mute",
       };
     } catch (error) {
       log.warn(`discord.toggle_mute call failed: ${errorMessage(error)}`);
+      this.isRunning = false;
       return {
         status: "unsupported",
         available: false,
         running: false,
-        muted: false,
-        deafened: false,
+        state_known: false,
+        muted: null,
+        deafened: null,
       };
     }
   }
@@ -82,30 +119,40 @@ export class DiscordService {
     try {
       const response = await this.hostBridge.call<unknown>("discord.toggle_deafen", {});
       const rec = asRecord(response);
+      const running = rec?.running === true || rec?.available === true;
+      this.isRunning = running;
+
       if (!rec || rec.status !== "ok") {
         return {
           status: (rec?.status as string) ?? "unsupported",
-          available: rec?.running === true,
-          running: rec?.running === true,
-          muted: false,
-          deafened: false,
+          available: running,
+          running,
+          state_known: false,
+          muted: null,
+          deafened: null,
+          message: typeof rec?.message === "string" ? rec.message : undefined,
         };
       }
+
       return {
         status: "ok",
         available: true,
         running: true,
-        muted: rec.muted === true,
-        deafened: rec.deafened === true,
+        state_known: false,
+        muted: null,
+        deafened: null,
+        action: typeof rec.action === "string" ? rec.action : "toggled_deafen",
       };
     } catch (error) {
       log.warn(`discord.toggle_deafen call failed: ${errorMessage(error)}`);
+      this.isRunning = false;
       return {
         status: "unsupported",
         available: false,
         running: false,
-        muted: false,
-        deafened: false,
+        state_known: false,
+        muted: null,
+        deafened: null,
       };
     }
   }
@@ -114,30 +161,32 @@ export class DiscordService {
     try {
       const response = await this.hostBridge.call<unknown>("discord.set_mute", { muted });
       const rec = asRecord(response);
-      if (!rec || rec.status !== "ok") {
-        return {
-          status: (rec?.status as string) ?? "unsupported",
-          available: rec?.running === true,
-          running: rec?.running === true,
-          muted: false,
-          deafened: false,
-        };
-      }
+      const running = rec?.running === true || rec?.available === true;
+      this.isRunning = running;
+
       return {
-        status: "ok",
-        available: true,
-        running: true,
-        muted: rec.muted === true,
-        deafened: rec.deafened === true,
+        status: (rec?.status as string) ?? "unsupported",
+        available: running,
+        running,
+        state_known: false,
+        muted: null,
+        deafened: null,
+        message:
+          typeof rec?.message === "string"
+            ? rec.message
+            : "Idempotent set_mute requires verified Discord state; use toggle_mute instead",
       };
     } catch (error) {
       log.warn(`discord.set_mute call failed: ${errorMessage(error)}`);
+      this.isRunning = false;
       return {
         status: "unsupported",
         available: false,
         running: false,
-        muted: false,
-        deafened: false,
+        state_known: false,
+        muted: null,
+        deafened: null,
+        message: "Idempotent set_mute requires verified Discord state; use toggle_mute instead",
       };
     }
   }
@@ -146,30 +195,32 @@ export class DiscordService {
     try {
       const response = await this.hostBridge.call<unknown>("discord.set_deafen", { deafened });
       const rec = asRecord(response);
-      if (!rec || rec.status !== "ok") {
-        return {
-          status: (rec?.status as string) ?? "unsupported",
-          available: rec?.running === true,
-          running: rec?.running === true,
-          muted: false,
-          deafened: false,
-        };
-      }
+      const running = rec?.running === true || rec?.available === true;
+      this.isRunning = running;
+
       return {
-        status: "ok",
-        available: true,
-        running: true,
-        muted: rec.muted === true,
-        deafened: rec.deafened === true,
+        status: (rec?.status as string) ?? "unsupported",
+        available: running,
+        running,
+        state_known: false,
+        muted: null,
+        deafened: null,
+        message:
+          typeof rec?.message === "string"
+            ? rec.message
+            : "Idempotent set_deafen requires verified Discord state; use toggle_deafen instead",
       };
     } catch (error) {
       log.warn(`discord.set_deafen call failed: ${errorMessage(error)}`);
+      this.isRunning = false;
       return {
         status: "unsupported",
         available: false,
         running: false,
-        muted: false,
-        deafened: false,
+        state_known: false,
+        muted: null,
+        deafened: null,
+        message: "Idempotent set_deafen requires verified Discord state; use toggle_deafen instead",
       };
     }
   }

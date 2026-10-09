@@ -123,15 +123,31 @@ describe("capabilities", () => {
     });
   });
 
-  test("dispatches discord RPC calls through discordService", async () => {
+  test("dispatches discord RPC calls and updates discord capability based on running process", async () => {
     const { NocturneManager } = await import("./nocturne-manager");
+    let discordRunning = false;
     const mockHostBridge: any = {
       call: async (method: string) => {
         if (method === "discord.get_status") {
-          return { status: "ok", running: true, muted: false, deafened: true };
+          return {
+            status: "ok",
+            running: discordRunning,
+            available: discordRunning,
+            state_known: false,
+            muted: null,
+            deafened: null,
+          };
         }
         if (method === "discord.toggle_mute") {
-          return { status: "ok", running: true, muted: true, deafened: true };
+          return {
+            status: discordRunning ? "ok" : "unsupported",
+            running: discordRunning,
+            available: discordRunning,
+            action: "toggled_mute",
+            state_known: false,
+            muted: null,
+            deafened: null,
+          };
         }
         return { status: "ok" };
       },
@@ -140,18 +156,24 @@ describe("capabilities", () => {
     };
     const manager = new NocturneManager({ platform: "win32", hostBridge: mockHostBridge, bluetoothService: fakeBluetoothService });
 
-    expect(manager.getCapabilities().discord).toBeTrue();
+    // Initially discord is false before status check or when process is not running
+    expect(manager.getCapabilities().discord).toBeFalse();
 
+    discordRunning = true;
     const statusRes = await manager.onCall("1", "discord.get_status", {});
     expect(statusRes).toEqual({
       result: {
         status: "ok",
         available: true,
         running: true,
-        muted: false,
-        deafened: true,
+        state_known: false,
+        muted: null,
+        deafened: null,
       },
     });
+
+    // Capability becomes true once Discord is verified running
+    expect(manager.getCapabilities().discord).toBeTrue();
 
     const toggleRes = await manager.onCall("2", "discord.toggle_mute", {});
     expect(toggleRes).toEqual({
@@ -159,8 +181,10 @@ describe("capabilities", () => {
         status: "ok",
         available: true,
         running: true,
-        muted: true,
-        deafened: true,
+        action: "toggled_mute",
+        state_known: false,
+        muted: null,
+        deafened: null,
       },
     });
   });
@@ -184,11 +208,11 @@ describe("capabilities", () => {
       systemMediaPreferenceStore: memoryStore,
     });
 
-    // Before start / verification, volume and media are unconfirmed -> volume: false, media: false, discord: true (since hostBridge is supplied)
+    // Before start / verification, volume, media, and discord are false
     expect(manager.getCapabilities()).toEqual({
       volume: false,
       media: false,
-      discord: true,
+      discord: false,
       systemStats: false,
       macros: false,
       appLaunch: false,
@@ -219,7 +243,7 @@ describe("capabilities", () => {
     expect(manager.getCapabilities()).toEqual({
       volume: true,
       media: false,
-      discord: true,
+      discord: false,
       systemStats: false,
       macros: false,
       appLaunch: false,

@@ -1,18 +1,11 @@
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Default)]
-pub struct WindowsDiscordState {
-    muted: AtomicBool,
-    deafened: AtomicBool,
-}
+pub struct WindowsDiscordState;
 
 impl WindowsDiscordState {
     pub fn new() -> Self {
-        Self {
-            muted: AtomicBool::new(false),
-            deafened: AtomicBool::new(false),
-        }
+        Self
     }
 
     pub fn is_discord_running(&self) -> bool {
@@ -65,19 +58,18 @@ impl WindowsDiscordState {
         }
     }
 
-    pub async fn dispatch(&self, method: &str, params: Value) -> Result<Value, String> {
+    pub async fn dispatch(&self, method: &str, _params: Value) -> Result<Value, String> {
         let running = self.is_discord_running();
 
         match method {
             "discord.get_status" | "discord.get_state" => {
-                let muted = self.muted.load(Ordering::Relaxed);
-                let deafened = self.deafened.load(Ordering::Relaxed);
                 Ok(serde_json::json!({
                     "status": "ok",
                     "available": running,
                     "running": running,
-                    "muted": muted,
-                    "deafened": deafened
+                    "state_known": false,
+                    "muted": Value::Null,
+                    "deafened": Value::Null
                 }))
             }
             "discord.toggle_mute" | "discord.toggleMute" => {
@@ -85,20 +77,32 @@ impl WindowsDiscordState {
                     return Ok(serde_json::json!({
                         "status": "unsupported",
                         "running": false,
-                        "muted": false,
-                        "deafened": false
+                        "available": false,
+                        "state_known": false,
+                        "muted": Value::Null,
+                        "deafened": Value::Null
                     }));
                 }
-                let current = self.muted.load(Ordering::Relaxed);
-                let next = !current;
-                self.muted.store(next, Ordering::Relaxed);
-                self.send_shortcut_toggle(next, false);
-                let deafened = self.deafened.load(Ordering::Relaxed);
+                let sent = self.send_shortcut_toggle(false);
+                if !sent {
+                    return Ok(serde_json::json!({
+                        "status": "error",
+                        "message": "SendInput failed to send mute shortcut",
+                        "running": true,
+                        "available": true,
+                        "state_known": false,
+                        "muted": Value::Null,
+                        "deafened": Value::Null
+                    }));
+                }
                 Ok(serde_json::json!({
                     "status": "ok",
                     "running": true,
-                    "muted": next,
-                    "deafened": deafened
+                    "available": true,
+                    "action": "toggled_mute",
+                    "state_known": false,
+                    "muted": Value::Null,
+                    "deafened": Value::Null
                 }))
             }
             "discord.toggle_deafen" | "discord.toggleDeafen" => {
@@ -106,77 +110,50 @@ impl WindowsDiscordState {
                     return Ok(serde_json::json!({
                         "status": "unsupported",
                         "running": false,
-                        "muted": false,
-                        "deafened": false
+                        "available": false,
+                        "state_known": false,
+                        "muted": Value::Null,
+                        "deafened": Value::Null
                     }));
                 }
-                let current = self.deafened.load(Ordering::Relaxed);
-                let next = !current;
-                self.deafened.store(next, Ordering::Relaxed);
-                self.send_shortcut_toggle(next, true);
-                let muted = self.muted.load(Ordering::Relaxed);
+                let sent = self.send_shortcut_toggle(true);
+                if !sent {
+                    return Ok(serde_json::json!({
+                        "status": "error",
+                        "message": "SendInput failed to send deafen shortcut",
+                        "running": true,
+                        "available": true,
+                        "state_known": false,
+                        "muted": Value::Null,
+                        "deafened": Value::Null
+                    }));
+                }
                 Ok(serde_json::json!({
                     "status": "ok",
                     "running": true,
-                    "muted": muted,
-                    "deafened": next
+                    "available": true,
+                    "action": "toggled_deafen",
+                    "state_known": false,
+                    "muted": Value::Null,
+                    "deafened": Value::Null
                 }))
             }
-            "discord.set_mute" => {
-                if !running {
-                    return Ok(serde_json::json!({
-                        "status": "unsupported",
-                        "running": false
-                    }));
-                }
-                let requested = params
-                    .get("muted")
-                    .and_then(Value::as_bool)
-                    .ok_or_else(|| "Missing 'muted' boolean field".to_string())?;
-
-                let current = self.muted.load(Ordering::Relaxed);
-                if current != requested {
-                    self.muted.store(requested, Ordering::Relaxed);
-                    self.send_shortcut_toggle(requested, false);
-                }
-                let deafened = self.deafened.load(Ordering::Relaxed);
+            "discord.set_mute" | "discord.set_deafen" => {
                 Ok(serde_json::json!({
-                    "status": "ok",
-                    "running": true,
-                    "muted": requested,
-                    "deafened": deafened
-                }))
-            }
-            "discord.set_deafen" => {
-                if !running {
-                    return Ok(serde_json::json!({
-                        "status": "unsupported",
-                        "running": false
-                    }));
-                }
-                let requested = params
-                    .get("deafened")
-                    .and_then(Value::as_bool)
-                    .ok_or_else(|| "Missing 'deafened' boolean field".to_string())?;
-
-                let current = self.deafened.load(Ordering::Relaxed);
-                if current != requested {
-                    self.deafened.store(requested, Ordering::Relaxed);
-                    self.send_shortcut_toggle(requested, true);
-                }
-                let muted = self.muted.load(Ordering::Relaxed);
-                Ok(serde_json::json!({
-                    "status": "ok",
-                    "running": true,
-                    "muted": muted,
-                    "deafened": requested
+                    "status": "unsupported",
+                    "message": "Idempotent set_mute/set_deafen requires verified Discord state; use toggle_mute or toggle_deafen instead",
+                    "running": running,
+                    "available": running,
+                    "state_known": false,
+                    "muted": Value::Null,
+                    "deafened": Value::Null
                 }))
             }
             _ => Err(format!("Unsupported discord method: {method}")),
         }
     }
 
-    fn send_shortcut_toggle(&self, _target_state: bool, _is_deafen: bool) {
+    fn send_shortcut_toggle(&self, _is_deafen: bool) -> bool {
         #[cfg(windows)]
         {
             use windows::Win32::UI::Input::KeyboardAndMouse::{
@@ -266,8 +243,13 @@ impl WindowsDiscordState {
                     },
                 ];
 
-                SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                let sent = SendInput(&inputs, std::mem::size_of::<INPUT>() as i32);
+                sent == inputs.len() as u32
             }
+        }
+        #[cfg(not(windows))]
+        {
+            false
         }
     }
 }
