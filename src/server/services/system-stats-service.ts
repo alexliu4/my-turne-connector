@@ -23,17 +23,25 @@ interface CachedSystemStats {
 
 export class SystemStatsService {
   private cache: CachedSystemStats | null = null;
-  private isHostAvailable = false;
+  private isHostVerified = false;
+  private inFlightPromise: Promise<SystemStats> | null = null;
 
   constructor(
     private readonly hostBridge: HostBridgeClient,
     private readonly platform: NodeJS.Platform = process.platform,
-  ) {
-    this.isHostAvailable = this.platform === "win32";
-  }
+  ) {}
 
   get isAvailable(): boolean {
-    return this.isHostAvailable;
+    return this.isHostVerified;
+  }
+
+  async start(): Promise<void> {
+    if (this.platform !== "win32") return;
+    try {
+      await this.getStats();
+    } catch (error) {
+      log.warn(`Background system stats probe failed: ${errorMessage(error)}`);
+    }
   }
 
   async getStats(): Promise<SystemStats> {
@@ -42,14 +50,27 @@ export class SystemStatsService {
       return this.cache.stats;
     }
 
+    if (this.inFlightPromise) {
+      return this.inFlightPromise;
+    }
+
+    this.inFlightPromise = this.fetchStatsFromHost(now).finally(() => {
+      this.inFlightPromise = null;
+    });
+
+    return this.inFlightPromise;
+  }
+
+  private async fetchStatsFromHost(now: number): Promise<SystemStats> {
     try {
       const response = await this.callHostWithTimeout("system_stats.get", {});
       const rec = asRecord(response);
 
       if (!rec || rec.status !== "ok") {
+        this.isHostVerified = false;
         const fallback: SystemStats = {
           status: typeof rec?.status === "string" ? rec.status : "unsupported",
-          available: rec?.available === true,
+          available: false,
           cpu_percent: null,
           memory_percent: null,
           memory_used_bytes: null,
@@ -60,7 +81,7 @@ export class SystemStatsService {
         return fallback;
       }
 
-      this.isHostAvailable = true;
+      this.isHostVerified = true;
       const stats: SystemStats = {
         status: "ok",
         available: true,
@@ -79,6 +100,7 @@ export class SystemStatsService {
       return stats;
     } catch (error) {
       log.warn(`system_stats.get call failed: ${errorMessage(error)}`);
+      this.isHostVerified = false;
       const fallback: SystemStats = {
         status: "unsupported",
         available: false,

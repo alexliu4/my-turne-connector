@@ -243,12 +243,12 @@ describe("capabilities", () => {
       systemMediaPreferenceStore: memoryStore,
     });
 
-    // Before start / verification, volume, media, and discord are false; systemStats is true on win32 with hostBridge
+    // Before start / verification, volume, media, discord, and systemStats are false
     expect(manager.getCapabilities()).toEqual({
       volume: false,
       media: false,
       discord: false,
-      systemStats: true,
+      systemStats: false,
       macros: false,
       appLaunch: false,
     });
@@ -279,7 +279,7 @@ describe("capabilities", () => {
       volume: true,
       media: false,
       discord: false,
-      systemStats: true,
+      systemStats: false,
       macros: false,
       appLaunch: false,
     });

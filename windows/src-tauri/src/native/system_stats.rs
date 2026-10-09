@@ -5,10 +5,10 @@ use std::time::Instant;
 #[derive(Debug, Clone)]
 struct CachedStats {
     timestamp: Instant,
-    cpu_percent: f64,
-    memory_percent: f64,
-    memory_used_bytes: u64,
-    memory_total_bytes: u64,
+    cpu_percent: Option<f64>,
+    memory_percent: Option<f64>,
+    memory_used_bytes: Option<u64>,
+    memory_total_bytes: Option<u64>,
     gpu_percent: Option<f64>,
 }
 
@@ -87,7 +87,15 @@ impl WindowsSystemStatsState {
         })
     }
 
-    fn sample_system(&self) -> (f64, f64, u64, u64, Option<f64>) {
+    fn sample_system(
+        &self,
+    ) -> (
+        Option<f64>,
+        Option<f64>,
+        Option<u64>,
+        Option<u64>,
+        Option<f64>,
+    ) {
         #[cfg(windows)]
         {
             use windows::Win32::Foundation::FILETIME;
@@ -106,13 +114,13 @@ impl WindowsSystemStatsState {
                     let avail = mem_status.ullAvailPhys;
                     let used = total.saturating_sub(avail);
                     let pct = if total > 0 {
-                        (used as f64 / total as f64) * 100.0
+                        Some(((used as f64 / total as f64) * 100.0 * 10.0).round() / 10.0)
                     } else {
-                        0.0
+                        Some(0.0)
                     };
-                    (pct, used, total)
+                    (pct, Some(used), Some(total))
                 } else {
-                    (0.0, 0, 0)
+                    (None, None, None)
                 }
             };
 
@@ -129,7 +137,7 @@ impl WindowsSystemStatsState {
                         user: filetime_to_u64(&user),
                     };
 
-                    let mut cpu_val = 0.0;
+                    let mut cpu_val = None;
                     if let Ok(mut guard) = self.last_cpu_sample.lock() {
                         if let Some((_prev_time, ref prev_sample)) = *guard {
                             let idle_diff = current_sample.idle.saturating_sub(prev_sample.idle);
@@ -140,27 +148,25 @@ impl WindowsSystemStatsState {
                             let total_diff = kernel_diff.saturating_add(user_diff);
                             if total_diff > 0 {
                                 let busy_diff = total_diff.saturating_sub(idle_diff);
-                                cpu_val = ((busy_diff as f64) / (total_diff as f64) * 100.0)
+                                let calculated = ((busy_diff as f64) / (total_diff as f64) * 100.0)
                                     .clamp(0.0, 100.0);
+                                cpu_val = Some((calculated * 10.0).round() / 10.0);
                             }
                         }
                         *guard = Some((Instant::now(), current_sample));
                     }
-                    // Round to 1 decimal place
-                    (cpu_val * 10.0).round() / 10.0
+                    cpu_val
                 } else {
-                    0.0
+                    None
                 }
             };
 
-            let mem_pct_rounded = (mem_pct * 10.0).round() / 10.0;
-
-            (cpu_pct, mem_pct_rounded, mem_used, mem_total, None)
+            (cpu_pct, mem_pct, mem_used, mem_total, None)
         }
 
         #[cfg(not(windows))]
         {
-            (0.0, 0.0, 0, 0, None)
+            (None, None, None, None, None)
         }
     }
 }
