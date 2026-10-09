@@ -3,6 +3,13 @@ import { SystemStatsService } from "./system-stats-service";
 import { NocturneManager } from "../nocturne-manager";
 import type { HostBridgeCallOptions, HostBridgeClient } from "../platform/host-bridge";
 
+const fakeBluetoothService: any = {
+  initialize: async () => {},
+  rfcommServer: { setDataHandler: () => {} },
+  rfcommOutbound: { setDataHandler: () => {} },
+  onEvent: () => {},
+};
+
 class DelayHostBridge implements HostBridgeClient {
   readonly calls: Array<{ method: string; params: unknown }> = [];
   responses: Record<string, unknown> = {};
@@ -217,6 +224,7 @@ describe("SystemStatsService", () => {
     const manager = new NocturneManager({
       platform: "win32",
       hostBridge: bridge,
+      bluetoothService: fakeBluetoothService,
     });
 
     // Before probe/verification, systemStats is false
@@ -245,6 +253,7 @@ describe("SystemStatsService", () => {
   it("returns unsupported stats when systemStatsService is absent on non-win32 platform", async () => {
     const manager = new NocturneManager({
       platform: "linux",
+      bluetoothService: fakeBluetoothService,
     });
 
     const capabilities = manager.getCapabilities();
