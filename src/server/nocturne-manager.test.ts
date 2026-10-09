@@ -110,7 +110,7 @@ describe("sendAppReady", () => {
 });
 
 describe("capabilities", () => {
-  test("returns false for volume and media when systemMediaService is null", async () => {
+  test("returns false for volume, media, and discord when hostBridge is null", async () => {
     const { NocturneManager } = await import("./nocturne-manager");
     const manager = new NocturneManager({ platform: "linux", bluetoothService: fakeBluetoothService });
     expect(manager.getCapabilities()).toEqual({
@@ -120,6 +120,107 @@ describe("capabilities", () => {
       systemStats: false,
       macros: false,
       appLaunch: false,
+    });
+  });
+
+  test("decouples Discord detection during initializeOffline so Bluetooth initializes without waiting", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+
+    let bluetoothInitialized = false;
+    const mockBluetooth: any = {
+      initialize: async () => {
+        bluetoothInitialized = true;
+      },
+      rfcommServer: { setDataHandler: () => {} },
+      rfcommOutbound: { setDataHandler: () => {} },
+      onEvent: () => {},
+    };
+
+    const hangingHostBridge: any = {
+      call: (method: string) => {
+        if (method.startsWith("media.") || method.startsWith("volume.")) {
+          return Promise.resolve({ status: "ok", volume_percent: 50 });
+        }
+        return new Promise(() => {}); // Never resolves for Discord
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: hangingHostBridge,
+      bluetoothService: mockBluetooth,
+    });
+
+    await manager.initializeOffline();
+
+    expect(bluetoothInitialized).toBeTrue();
+  });
+
+  test("dispatches discord RPC calls and updates discord capability based on running process", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    let discordRunning = false;
+    const mockHostBridge: any = {
+      call: async (method: string) => {
+        if (method === "discord.get_status") {
+          return {
+            status: "ok",
+            running: discordRunning,
+            available: discordRunning,
+            state_known: false,
+            muted: null,
+            deafened: null,
+          };
+        }
+        if (method === "discord.toggle_mute") {
+          return {
+            status: discordRunning ? "ok" : "unsupported",
+            running: discordRunning,
+            available: discordRunning,
+            action: "toggled_mute",
+            state_known: false,
+            muted: null,
+            deafened: null,
+          };
+        }
+        return { status: "ok" };
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+    const manager = new NocturneManager({ platform: "win32", hostBridge: mockHostBridge, bluetoothService: fakeBluetoothService });
+
+    // Initially discord is false before status check or when process is not running
+    expect(manager.getCapabilities().discord).toBeFalse();
+
+    discordRunning = true;
+    const statusRes = await manager.onCall("1", "discord.get_status", {});
+    expect(statusRes).toEqual({
+      result: {
+        status: "ok",
+        available: true,
+        running: true,
+        state_known: false,
+        muted: null,
+        deafened: null,
+      },
+    });
+
+    // Capability becomes true once Discord is verified running
+    expect(manager.getCapabilities().discord).toBeTrue();
+
+    const toggleRes = await manager.onCall("2", "discord.toggle_mute", {});
+    expect(toggleRes).toEqual({
+      result: {
+        status: "ok",
+        available: true,
+        running: true,
+        action: "toggled_mute",
+        state_known: false,
+        muted: null,
+        deafened: null,
+      },
     });
   });
 
@@ -142,7 +243,7 @@ describe("capabilities", () => {
       systemMediaPreferenceStore: memoryStore,
     });
 
-    // Before start / verification, volume and media are unconfirmed -> volume: false, media: false
+    // Before start / verification, volume, media, and discord are false
     expect(manager.getCapabilities()).toEqual({
       volume: false,
       media: false,
@@ -361,4 +462,16 @@ describe("Car Thing OTA request parameters", () => {
       bandaidVersion: "4.1.0",
     });
   });
+});
+
+
+test("Discord absent responses consistently report unknown mute state", async () => {
+  const { NocturneManager } = await import("./nocturne-manager");
+  const manager = new NocturneManager({ platform: "linux", bluetoothService: fakeBluetoothService });
+  for (const method of ["discord.get_status", "discord.get_state", "discord.toggle_mute", "discord.toggleMute", "discord.toggle_deafen", "discord.toggleDeafen", "discord.set_mute", "discord.set_deafen"]) {
+    expect(await manager.onCall("absent", method, {})).toEqual({ result: {
+      status: "unsupported", available: false, running: false,
+      state_known: false, muted: null, deafened: null,
+    } });
+  }
 });

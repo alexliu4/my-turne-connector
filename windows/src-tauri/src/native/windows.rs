@@ -1,5 +1,7 @@
 #[path = "bluetooth.rs"]
 mod bluetooth;
+#[path = "discord.rs"]
+mod discord;
 #[path = "media.rs"]
 mod media;
 #[path = "security.rs"]
@@ -11,6 +13,7 @@ use std::sync::Arc;
 
 pub struct WindowsNativeState {
     bluetooth: Arc<bluetooth::WindowsBluetoothState>,
+    discord: Arc<discord::WindowsDiscordState>,
     media: Arc<media::WindowsMediaState>,
 }
 
@@ -18,6 +21,7 @@ impl WindowsNativeState {
     pub fn new() -> Self {
         Self {
             bluetooth: Arc::new(bluetooth::WindowsBluetoothState::new()),
+            discord: Arc::new(discord::WindowsDiscordState::new()),
             media: Arc::new(media::WindowsMediaState::new()),
         }
     }
@@ -46,6 +50,9 @@ impl WindowsNativeState {
         }
         if method.starts_with("media.") || method.starts_with("volume.") {
             return self.media.dispatch(bridge, method, params).await;
+        }
+        if method.starts_with("discord.") {
+            return self.discord.dispatch(method, params).await;
         }
         if method == "security.protect" {
             let value = params
