@@ -110,7 +110,7 @@ describe("sendAppReady", () => {
 });
 
 describe("capabilities", () => {
-  test("returns false for volume and media when systemMediaService is null", async () => {
+  test("returns false for volume, media, and discord when hostBridge is null", async () => {
     const { NocturneManager } = await import("./nocturne-manager");
     const manager = new NocturneManager({ platform: "linux", bluetoothService: fakeBluetoothService });
     expect(manager.getCapabilities()).toEqual({
@@ -120,6 +120,48 @@ describe("capabilities", () => {
       systemStats: false,
       macros: false,
       appLaunch: false,
+    });
+  });
+
+  test("dispatches discord RPC calls through discordService", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    const mockHostBridge: any = {
+      call: async (method: string) => {
+        if (method === "discord.get_status") {
+          return { status: "ok", running: true, muted: false, deafened: true };
+        }
+        if (method === "discord.toggle_mute") {
+          return { status: "ok", running: true, muted: true, deafened: true };
+        }
+        return { status: "ok" };
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+    const manager = new NocturneManager({ platform: "win32", hostBridge: mockHostBridge, bluetoothService: fakeBluetoothService });
+
+    expect(manager.getCapabilities().discord).toBeTrue();
+
+    const statusRes = await manager.onCall("1", "discord.get_status", {});
+    expect(statusRes).toEqual({
+      result: {
+        status: "ok",
+        available: true,
+        running: true,
+        muted: false,
+        deafened: true,
+      },
+    });
+
+    const toggleRes = await manager.onCall("2", "discord.toggle_mute", {});
+    expect(toggleRes).toEqual({
+      result: {
+        status: "ok",
+        available: true,
+        running: true,
+        muted: true,
+        deafened: true,
+      },
     });
   });
 
@@ -142,11 +184,11 @@ describe("capabilities", () => {
       systemMediaPreferenceStore: memoryStore,
     });
 
-    // Before start / verification, volume and media are unconfirmed -> volume: false, media: false
+    // Before start / verification, volume and media are unconfirmed -> volume: false, media: false, discord: true (since hostBridge is supplied)
     expect(manager.getCapabilities()).toEqual({
       volume: false,
       media: false,
-      discord: false,
+      discord: true,
       systemStats: false,
       macros: false,
       appLaunch: false,
@@ -177,7 +219,7 @@ describe("capabilities", () => {
     expect(manager.getCapabilities()).toEqual({
       volume: true,
       media: false,
-      discord: false,
+      discord: true,
       systemStats: false,
       macros: false,
       appLaunch: false,
