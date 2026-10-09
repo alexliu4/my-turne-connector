@@ -218,11 +218,9 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       }
     }
     if (this.discordService) {
-      try {
-        await this.discordService.start();
-      } catch (err) {
-        log.warn(`Discord service initialization failed: ${errorMessage(err)}`);
-      }
+      void this.discordService.start().catch((err) => {
+        log.warn(`Background Discord detection failed: ${errorMessage(err)}`);
+      });
     }
     await this.bluetoothService.initialize();
 

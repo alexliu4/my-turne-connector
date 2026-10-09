@@ -2,6 +2,7 @@ import { createLogger } from "../utils/logger";
 import type { HostBridgeClient } from "../platform/host-bridge";
 
 const log = createLogger("DiscordService");
+const DISCORD_RPC_TIMEOUT_MS = 2_000;
 
 export interface DiscordStatus {
   status: string;
@@ -14,11 +15,23 @@ export interface DiscordStatus {
   message?: string;
 }
 
+/**
+ * DiscordService handles communications with the Windows native host bridge for Discord integration.
+ *
+ * Capability Refresh Behavior:
+ * - `connector.capabilities` reports `discord: isAvailable`, which reads the cached `isRunning` state.
+ * - Calling `discord.get_status` or running `refreshStatus()` probes the native host and refreshes `isRunning`.
+ * - No high-frequency polling loop is created. Probes occur on startup and explicit UI/RPC status queries.
+ */
 export class DiscordService {
   private isRunning = false;
 
   constructor(private readonly hostBridge: HostBridgeClient) {}
 
+  /**
+   * Indicates whether Discord is currently verified running on the host system.
+   * This cached value is reported in `connector.capabilities`.
+   */
   get isAvailable(): boolean {
     return this.isRunning;
   }
@@ -34,7 +47,7 @@ export class DiscordService {
 
   async getStatus(): Promise<DiscordStatus> {
     try {
-      const response = await this.hostBridge.call<unknown>("discord.get_status", {});
+      const response = await this.callHostWithTimeout("discord.get_status", {});
       const rec = asRecord(response);
       const running = rec?.running === true || rec?.available === true;
       this.isRunning = running;
@@ -75,7 +88,7 @@ export class DiscordService {
 
   async toggleMute(): Promise<DiscordStatus> {
     try {
-      const response = await this.hostBridge.call<unknown>("discord.toggle_mute", {});
+      const response = await this.callHostWithTimeout("discord.toggle_mute", {});
       const rec = asRecord(response);
       const running = rec?.running === true || rec?.available === true;
       this.isRunning = running;
@@ -117,7 +130,7 @@ export class DiscordService {
 
   async toggleDeafen(): Promise<DiscordStatus> {
     try {
-      const response = await this.hostBridge.call<unknown>("discord.toggle_deafen", {});
+      const response = await this.callHostWithTimeout("discord.toggle_deafen", {});
       const rec = asRecord(response);
       const running = rec?.running === true || rec?.available === true;
       this.isRunning = running;
@@ -159,7 +172,7 @@ export class DiscordService {
 
   async setMute(muted: boolean): Promise<DiscordStatus> {
     try {
-      const response = await this.hostBridge.call<unknown>("discord.set_mute", { muted });
+      const response = await this.callHostWithTimeout("discord.set_mute", { muted });
       const rec = asRecord(response);
       const running = rec?.running === true || rec?.available === true;
       this.isRunning = running;
@@ -193,7 +206,7 @@ export class DiscordService {
 
   async setDeafen(deafened: boolean): Promise<DiscordStatus> {
     try {
-      const response = await this.hostBridge.call<unknown>("discord.set_deafen", { deafened });
+      const response = await this.callHostWithTimeout("discord.set_deafen", { deafened });
       const rec = asRecord(response);
       const running = rec?.running === true || rec?.available === true;
       this.isRunning = running;
@@ -223,6 +236,22 @@ export class DiscordService {
         message: "Idempotent set_deafen requires verified Discord state; use toggle_deafen instead",
       };
     }
+  }
+
+  private callHostWithTimeout(method: string, params: unknown): Promise<unknown> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Error(`Discord RPC ${method} timed out after ${DISCORD_RPC_TIMEOUT_MS}ms`));
+      }, DISCORD_RPC_TIMEOUT_MS);
+    });
+
+    return Promise.race([
+      this.hostBridge.call(method, params, { timeoutMs: DISCORD_RPC_TIMEOUT_MS }),
+      timeoutPromise,
+    ]).finally(() => {
+      if (timer) clearTimeout(timer);
+    });
   }
 }
 

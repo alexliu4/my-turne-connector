@@ -123,6 +123,41 @@ describe("capabilities", () => {
     });
   });
 
+  test("decouples Discord detection during initializeOffline so Bluetooth initializes without waiting", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+
+    let bluetoothInitialized = false;
+    const mockBluetooth: any = {
+      initialize: async () => {
+        bluetoothInitialized = true;
+      },
+      rfcommServer: { setDataHandler: () => {} },
+      rfcommOutbound: { setDataHandler: () => {} },
+      onEvent: () => {},
+    };
+
+    const hangingHostBridge: any = {
+      call: (method: string) => {
+        if (method.startsWith("media.") || method.startsWith("volume.")) {
+          return Promise.resolve({ status: "ok", volume_percent: 50 });
+        }
+        return new Promise(() => {}); // Never resolves for Discord
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: hangingHostBridge,
+      bluetoothService: mockBluetooth,
+    });
+
+    await manager.initializeOffline();
+
+    expect(bluetoothInitialized).toBeTrue();
+  });
+
   test("dispatches discord RPC calls and updates discord capability based on running process", async () => {
     const { NocturneManager } = await import("./nocturne-manager");
     let discordRunning = false;
