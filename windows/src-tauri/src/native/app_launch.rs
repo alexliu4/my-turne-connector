@@ -19,26 +19,42 @@ impl WindowsAppLaunchState {
         }
     }
 
-    pub fn launch(&self, app_id: &str) -> Result<Value, String> {
-        let app_lower = app_id.trim().to_lowercase();
-        let launched_app = match app_lower.as_str() {
-            "vscode" | "code" => self.launch_target(&["vscode://", "code://", "code"]),
-            "discord" => self.launch_target(&["discord://", "discord"]),
-            "browser" | "default_browser" => self.launch_target(&["https://"]),
-            "steam" => self.launch_target(&["steam://", "steam"]),
-            "spotify" => self.launch_target(&["spotify://", "spotify"]),
-            "terminal" | "wt" | "cmd" => self.launch_target(&["wt.exe", "cmd.exe"]),
-            "calc" | "calculator" => self.launch_target(&["calc.exe"]),
-            _ => {
-                return Ok(serde_json::json!({
-                    "status": "invalid_app",
-                    "error": format!("Application '{app_id}' is not in the configured allowlist"),
-                    "launched": false
-                }));
+    pub fn launch(&self, app_id: &str, target: Option<&str>, fallbacks: &[&str]) -> Result<Value, String> {
+        let mut targets_to_try: Vec<&str> = Vec::new();
+        if let Some(t) = target {
+            if !t.trim().is_empty() {
+                targets_to_try.push(t.trim());
             }
-        };
+        }
+        for fb in fallbacks {
+            if !fb.trim().is_empty() && !targets_to_try.contains(&fb.trim()) {
+                targets_to_try.push(fb.trim());
+            }
+        }
 
-        if launched_app {
+        if targets_to_try.is_empty() {
+            let app_lower = app_id.trim().to_lowercase();
+            match app_lower.as_str() {
+                "vscode" | "code" => targets_to_try.extend_from_slice(&["vscode://", "code://", "code"]),
+                "discord" => targets_to_try.extend_from_slice(&["discord://", "discord"]),
+                "browser" | "default_browser" => targets_to_try.extend_from_slice(&["https://usenocturne.com/"]),
+                "steam" => targets_to_try.extend_from_slice(&["steam://", "steam"]),
+                "spotify" => targets_to_try.extend_from_slice(&["spotify://", "spotify"]),
+                "terminal" | "wt" | "cmd" => targets_to_try.extend_from_slice(&["wt.exe", "cmd.exe"]),
+                "calc" | "calculator" => targets_to_try.extend_from_slice(&["calc.exe"]),
+                _ => {
+                    return Ok(serde_json::json!({
+                        "status": "invalid_app",
+                        "error": format!("Application '{app_id}' has no valid launch targets configured"),
+                        "launched": false
+                    }));
+                }
+            }
+        }
+
+        let launched = self.launch_target(&targets_to_try);
+
+        if launched {
             Ok(serde_json::json!({
                 "status": "ok",
                 "app": app_id,
@@ -63,6 +79,9 @@ impl WindowsAppLaunchState {
             let open_op: Vec<u16> = "open".encode_utf16().chain(std::iter::once(0)).collect();
 
             for target in targets {
+                if target.trim().is_empty() {
+                    continue;
+                }
                 let wide: Vec<u16> = target.encode_utf16().chain(std::iter::once(0)).collect();
                 unsafe {
                     let res = ShellExecuteW(
@@ -97,7 +116,6 @@ impl WindowsAppLaunchState {
             | "app_launch.get_state" => Ok(serde_json::json!({
                 "status": "ok",
                 "available": available,
-                "apps": ["vscode", "discord", "browser", "steam", "spotify", "terminal", "calc"]
             })),
             "app_launch.launch" | "appLaunch.launch" | "app.launch" => {
                 if !available {
@@ -122,9 +140,29 @@ impl WindowsAppLaunchState {
                     }));
                 }
 
-                self.launch(app_id)
+                let target = params.get("target").and_then(Value::as_str);
+                let fallbacks: Vec<&str> = params
+                    .get("fallbacks")
+                    .and_then(Value::as_array)
+                    .map(|arr| arr.iter().filter_map(Value::as_str).collect())
+                    .unwrap_or_default();
+
+                self.launch(app_id, target, &fallbacks)
             }
             _ => Err(format!("Unsupported app_launch method: {method}")),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_empty_or_unconfigured_launch_targets() {
+        let state = WindowsAppLaunchState::new();
+        let res = state.launch("unknown_app", None, &[]).unwrap();
+        assert_eq!(res.get("status").unwrap(), "invalid_app");
+        assert_eq!(res.get("launched").unwrap(), false);
     }
 }

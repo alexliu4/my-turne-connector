@@ -35,6 +35,8 @@ import { DiscordService } from "./services/discord-service";
 import { SystemStatsService } from "./services/system-stats-service";
 import { AppLaunchService } from "./services/app-launch-service";
 import { MacroService } from "./services/macro-service";
+import type { AppLaunchPreferenceStore } from "./services/app-launch-config";
+import type { MacroPreferenceStore } from "./services/macro-config";
 
 const log = createLogger("NocturneManager");
 const KEEP_ALIVE_RPC_TIMEOUT_MS = 5_000;
@@ -82,6 +84,8 @@ export interface NocturneManagerDependencies {
   sessionProtector?: SessionProtector;
   spotifySkipPreferenceStore?: SpotifySkipPreferenceStore;
   systemMediaPreferenceStore?: SystemMediaPreferenceStore;
+  appLaunchPreferenceStore?: AppLaunchPreferenceStore;
+  macroPreferenceStore?: MacroPreferenceStore;
   carThingOtaService?: CarThingOTAService;
 }
 
@@ -151,10 +155,18 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       ? new SystemStatsService(dependencies.hostBridge, this.platform)
       : null;
     this.appLaunchService = dependencies.hostBridge
-      ? new AppLaunchService(dependencies.hostBridge, this.platform)
+      ? new AppLaunchService(
+          dependencies.hostBridge,
+          this.platform,
+          dependencies.appLaunchPreferenceStore,
+        )
       : null;
     this.macroService = dependencies.hostBridge
-      ? new MacroService(dependencies.hostBridge, this.platform)
+      ? new MacroService(
+          dependencies.hostBridge,
+          this.platform,
+          dependencies.macroPreferenceStore,
+        )
       : null;
 
     this.authService.onAuthStateChange(async (user) => {

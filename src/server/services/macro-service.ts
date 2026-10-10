@@ -1,5 +1,10 @@
 import { createLogger } from "../utils/logger";
 import type { HostBridgeClient } from "../platform/host-bridge";
+import {
+  type MacroDefinition,
+  type MacroPreferenceStore,
+  FileSystemMacroPreferenceStore,
+} from "./macro-config";
 
 const log = createLogger("MacroService");
 const MACRO_RPC_TIMEOUT_MS = 2_000;
@@ -7,6 +12,7 @@ const MACRO_RPC_TIMEOUT_MS = 2_000;
 export interface MacroStatus {
   status: string;
   available: boolean;
+  macros?: MacroDefinition[];
   message?: string;
 }
 
@@ -19,7 +25,7 @@ export interface MacroResult {
 
 /**
  * MacroService handles execution of constrained macro actions through the native host bridge.
- * Supported action types include configured app launches, media controls, validated HTTP/HTTPS URLs, and key shortcuts.
+ * Execution is restricted strictly to explicitly configured macro IDs stored in user configuration.
  */
 export class MacroService {
   private isHostVerified = false;
@@ -27,10 +33,13 @@ export class MacroService {
   constructor(
     private readonly hostBridge: HostBridgeClient,
     private readonly platform: NodeJS.Platform = process.platform,
+    private readonly preferenceStore: MacroPreferenceStore = new FileSystemMacroPreferenceStore(),
   ) {}
 
   get isAvailable(): boolean {
-    return this.isHostVerified;
+    const config = this.preferenceStore.load();
+    const hasConfiguredMacros = Object.values(config.macros).some((m) => m.enabled !== false);
+    return this.isHostVerified && hasConfiguredMacros;
   }
 
   async start(): Promise<void> {
@@ -49,17 +58,22 @@ export class MacroService {
       const available = rec?.status === "ok" && rec?.available === true;
       this.isHostVerified = available;
 
+      const config = this.preferenceStore.load();
+      const configuredMacros = Object.values(config.macros).filter((m) => m.enabled !== false);
+
       if (!rec || rec.status !== "ok") {
         return {
           status: typeof rec?.status === "string" ? rec.status : "unsupported",
           available: false,
+          macros: [],
           message: typeof rec?.message === "string" ? rec.message : undefined,
         };
       }
 
       return {
         status: "ok",
-        available: true,
+        available: available && configuredMacros.length > 0,
+        macros: configuredMacros,
       };
     } catch (error) {
       log.warn(`macros.get_status call failed: ${errorMessage(error)}`);
@@ -67,14 +81,49 @@ export class MacroService {
       return {
         status: "unsupported",
         available: false,
+        macros: [],
         message: errorMessage(error),
       };
     }
   }
 
   async executeMacro(params: unknown): Promise<MacroResult> {
+    const recParams = asRecord(params);
+    const macroId =
+      typeof recParams?.id === "string" && recParams.id
+        ? recParams.id
+        : typeof recParams?.macro_id === "string" && recParams.macro_id
+        ? recParams.macro_id
+        : typeof recParams?.macroId === "string" && recParams.macroId
+        ? recParams.macroId
+        : null;
+
+    if (!macroId) {
+      log.warn("Rejecting macro request: Missing macro ID");
+      return {
+        status: "invalid_action",
+        error: "Macro request must specify a valid configured macro ID",
+      };
+    }
+
+    const config = this.preferenceStore.load();
+    const macroDef = config.macros[macroId];
+
+    if (!macroDef || macroDef.enabled === false) {
+      log.warn(`Rejecting unconfigured or disabled macro execution request: ${macroId}`);
+      return {
+        status: "invalid_action",
+        error: `Macro '${macroId}' is not configured or enabled`,
+      };
+    }
+
+    const payload = {
+      id: macroDef.id,
+      ...macroDef.action,
+    };
+
     try {
-      const response = await this.callHostWithTimeout("macros.execute", params);
+      const response = await this.callHostWithTimeout("macros.execute", payload);
       const rec = asRecord(response);
 
       if (!rec) {
@@ -86,12 +135,12 @@ export class MacroService {
 
       return {
         status: typeof rec.status === "string" ? rec.status : "unsupported",
-        action: typeof rec.action === "string" ? rec.action : undefined,
+        action: typeof rec.action === "string" ? rec.action : macroDef.action.type,
         error: typeof rec.error === "string" ? rec.error : undefined,
         ...rec,
       };
     } catch (error) {
-      log.warn(`macros.execute call failed: ${errorMessage(error)}`);
+      log.warn(`macros.execute call failed for ${macroId}: ${errorMessage(error)}`);
       return {
         status: "error",
         error: errorMessage(error),

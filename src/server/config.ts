@@ -73,6 +73,8 @@ export const AUTH_SESSION_PATH = `${CONNECTOR_STATE_DIR}/auth-session.json`;
 export const SETUP_STATE_PATH = `${CONNECTOR_STATE_DIR}/setup-state.json`;
 export const SYSTEM_MEDIA_ENABLED_PATH = `${CONNECTOR_STATE_DIR}/system-media-enabled.json`;
 export const SPOTIFY_SKIPPED_PATH = `${CONNECTOR_STATE_DIR}/spotify-skipped.json`;
+export const APP_LAUNCH_CONFIG_PATH = `${CONNECTOR_STATE_DIR}/app-launch-config.json`;
+export const MACROS_CONFIG_PATH = `${CONNECTOR_STATE_DIR}/macros-config.json`;
 
 export const SPOTIFY_SCOPES = [
   "app-remote-control",

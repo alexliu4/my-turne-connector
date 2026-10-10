@@ -1,5 +1,10 @@
 import { createLogger } from "../utils/logger";
 import type { HostBridgeClient } from "../platform/host-bridge";
+import {
+  type AppDefinition,
+  type AppLaunchPreferenceStore,
+  FileSystemAppLaunchPreferenceStore,
+} from "./app-launch-config";
 
 const log = createLogger("AppLaunchService");
 const APP_LAUNCH_RPC_TIMEOUT_MS = 2_000;
@@ -7,7 +12,7 @@ const APP_LAUNCH_RPC_TIMEOUT_MS = 2_000;
 export interface AppLaunchStatus {
   status: string;
   available: boolean;
-  apps?: string[];
+  apps?: AppDefinition[];
   message?: string;
 }
 
@@ -20,7 +25,7 @@ export interface AppLaunchResult {
 
 /**
  * AppLaunchService handles application launching requests through the Windows native host bridge.
- * To ensure remote execution safety, launch operations validate against an allowlist of configured host applications.
+ * To ensure remote execution safety, launch operations validate strictly against locally configured application definitions.
  */
 export class AppLaunchService {
   private isHostVerified = false;
@@ -28,10 +33,13 @@ export class AppLaunchService {
   constructor(
     private readonly hostBridge: HostBridgeClient,
     private readonly platform: NodeJS.Platform = process.platform,
+    private readonly preferenceStore: AppLaunchPreferenceStore = new FileSystemAppLaunchPreferenceStore(),
   ) {}
 
   get isAvailable(): boolean {
-    return this.isHostVerified;
+    const config = this.preferenceStore.load();
+    const hasConfiguredApps = Object.values(config.apps).some((app) => app.enabled !== false);
+    return this.isHostVerified && hasConfiguredApps;
   }
 
   async start(): Promise<void> {
@@ -50,6 +58,9 @@ export class AppLaunchService {
       const available = rec?.status === "ok" && rec?.available === true;
       this.isHostVerified = available;
 
+      const config = this.preferenceStore.load();
+      const configuredApps = Object.values(config.apps).filter((app) => app.enabled !== false);
+
       if (!rec || rec.status !== "ok") {
         return {
           status: typeof rec?.status === "string" ? rec.status : "unsupported",
@@ -61,8 +72,8 @@ export class AppLaunchService {
 
       return {
         status: "ok",
-        available: true,
-        apps: Array.isArray(rec.apps) ? rec.apps.map(String) : [],
+        available: available && configuredApps.length > 0,
+        apps: configuredApps,
       };
     } catch (error) {
       log.warn(`app_launch.get_status call failed: ${errorMessage(error)}`);
@@ -76,9 +87,26 @@ export class AppLaunchService {
     }
   }
 
-  async launchApp(app: string): Promise<AppLaunchResult> {
+  async launchApp(appId: string): Promise<AppLaunchResult> {
+    const config = this.preferenceStore.load();
+    const appDef = config.apps[appId];
+
+    if (!appDef || appDef.enabled === false) {
+      log.warn(`Rejecting unconfigured or disabled app launch request: ${appId}`);
+      return {
+        status: "invalid_app",
+        app: appId,
+        launched: false,
+        error: `Application '${appId}' is not configured or enabled`,
+      };
+    }
+
     try {
-      const response = await this.callHostWithTimeout("app_launch.launch", { app });
+      const response = await this.callHostWithTimeout("app_launch.launch", {
+        app: appDef.id,
+        target: appDef.target,
+        fallbacks: appDef.fallbacks ?? [],
+      });
       const rec = asRecord(response);
 
       if (!rec) {
@@ -91,15 +119,15 @@ export class AppLaunchService {
 
       return {
         status: typeof rec.status === "string" ? rec.status : "unsupported",
-        app: typeof rec.app === "string" ? rec.app : app,
+        app: typeof rec.app === "string" ? rec.app : appDef.id,
         launched: rec.launched === true,
         error: typeof rec.error === "string" ? rec.error : undefined,
       };
     } catch (error) {
-      log.warn(`app_launch.launch call failed: ${errorMessage(error)}`);
+      log.warn(`app_launch.launch call failed for ${appId}: ${errorMessage(error)}`);
       return {
         status: "error",
-        app,
+        app: appId,
         launched: false,
         error: errorMessage(error),
       };

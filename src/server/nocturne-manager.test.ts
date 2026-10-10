@@ -482,7 +482,7 @@ describe("app launch and macro capabilities and RPCs", () => {
     const mockHostBridge: any = {
       call: async (method: string, params: any) => {
         if (method === "app_launch.get_status") {
-          return { status: "ok", available: true, apps: ["vscode", "discord", "browser"] };
+          return { status: "ok", available: true };
         }
         if (method === "app_launch.launch") {
           return { status: "ok", app: params?.app, launched: true };
@@ -491,7 +491,7 @@ describe("app launch and macro capabilities and RPCs", () => {
           return { status: "ok", available: true };
         }
         if (method === "macros.execute") {
-          return { status: "ok", action: params?.action, launched: true };
+          return { status: "ok", action: "media", control: "toggle" };
         }
         return { status: "ok" };
       },
@@ -499,7 +499,40 @@ describe("app launch and macro capabilities and RPCs", () => {
       close: () => {},
     };
 
-    const manager = new NocturneManager({ platform: "win32", hostBridge: mockHostBridge, bluetoothService: fakeBluetoothService });
+    const mockAppStore: any = {
+      load() {
+        return {
+          apps: {
+            vscode: { id: "vscode", name: "VS Code", target: "vscode://", enabled: true },
+          },
+        };
+      },
+      save() {},
+    };
+
+    const mockMacroStore: any = {
+      load() {
+        return {
+          macros: {
+            toggle_media: {
+              id: "toggle_media",
+              name: "Toggle Media",
+              action: { type: "media", control: "toggle" },
+              enabled: true,
+            },
+          },
+        };
+      },
+      save() {},
+    };
+
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: mockHostBridge,
+      bluetoothService: fakeBluetoothService,
+      appLaunchPreferenceStore: mockAppStore,
+      macroPreferenceStore: mockMacroStore,
+    });
 
     expect(manager.getCapabilities().appLaunch).toBeFalse();
     expect(manager.getCapabilities().macros).toBeFalse();
@@ -515,9 +548,9 @@ describe("app launch and macro capabilities and RPCs", () => {
       result: { status: "ok", app: "vscode", launched: true },
     });
 
-    const macroRes = await manager.onCall("2", "macro.execute", { action: "app", app: "vscode" });
+    const macroRes = await manager.onCall("2", "macro.execute", { id: "toggle_media" });
     expect(macroRes).toEqual({
-      result: { status: "ok", action: "app", launched: true },
+      result: { status: "ok", action: "media", control: "toggle" },
     });
   });
 
@@ -528,7 +561,7 @@ describe("app launch and macro capabilities and RPCs", () => {
     expect(await manager.onCall("1", "app.launch", { app: "vscode" })).toEqual({
       result: { status: "unsupported", launched: false },
     });
-    expect(await manager.onCall("2", "macro.execute", { action: "app" })).toEqual({
+    expect(await manager.onCall("2", "macro.execute", { id: "toggle_media" })).toEqual({
       result: { status: "unsupported" },
     });
   });

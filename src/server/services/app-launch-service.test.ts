@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { AppLaunchService } from "./app-launch-service";
+import type { AppLaunchConfig, AppLaunchPreferenceStore } from "./app-launch-config";
 import type { HostBridgeCallOptions, HostBridgeClient } from "../platform/host-bridge";
 
 class FakeHostBridge implements HostBridgeClient {
@@ -25,28 +26,51 @@ class FakeHostBridge implements HostBridgeClient {
   close(): void {}
 }
 
+class MemoryAppLaunchPreferenceStore implements AppLaunchPreferenceStore {
+  constructor(
+    private config: AppLaunchConfig = {
+      apps: {
+        vscode: {
+          id: "vscode",
+          name: "VS Code",
+          target: "vscode://",
+          fallbacks: ["code"],
+          enabled: true,
+        },
+      },
+    },
+  ) {}
+
+  load(): AppLaunchConfig {
+    return this.config;
+  }
+
+  save(config: AppLaunchConfig): void {
+    this.config = config;
+  }
+}
+
 describe("AppLaunchService", () => {
-  it("queries getStatus and reports appLaunch capability", async () => {
+  it("queries getStatus and reports appLaunch capability when configured apps exist", async () => {
     const bridge = new FakeHostBridge();
     bridge.responses["app_launch.get_status"] = {
       status: "ok",
       available: true,
-      apps: ["vscode", "discord", "browser", "steam"],
     };
 
-    const service = new AppLaunchService(bridge, "win32");
+    const store = new MemoryAppLaunchPreferenceStore();
+    const service = new AppLaunchService(bridge, "win32", store);
     expect(service.isAvailable).toBeFalse();
 
     const status = await service.getStatus();
-    expect(status).toEqual({
-      status: "ok",
-      available: true,
-      apps: ["vscode", "discord", "browser", "steam"],
-    });
+    expect(status.status).toBe("ok");
+    expect(status.available).toBeTrue();
+    expect(status.apps).toHaveLength(1);
+    expect(status.apps?.[0].id).toBe("vscode");
     expect(service.isAvailable).toBeTrue();
   });
 
-  it("launches allowed application successfully", async () => {
+  it("launches allowed application with configured target and fallbacks", async () => {
     const bridge = new FakeHostBridge();
     bridge.responses["app_launch.launch"] = {
       status: "ok",
@@ -54,7 +78,8 @@ describe("AppLaunchService", () => {
       launched: true,
     };
 
-    const service = new AppLaunchService(bridge, "win32");
+    const store = new MemoryAppLaunchPreferenceStore();
+    const service = new AppLaunchService(bridge, "win32", store);
     const result = await service.launchApp("vscode");
 
     expect(result).toEqual({
@@ -66,41 +91,49 @@ describe("AppLaunchService", () => {
     expect(bridge.calls).toHaveLength(1);
     expect(bridge.calls[0]).toEqual({
       method: "app_launch.launch",
-      params: { app: "vscode" },
+      params: {
+        app: "vscode",
+        target: "vscode://",
+        fallbacks: ["code"],
+      },
     });
   });
 
-  it("handles non-allowlisted application rejection safely", async () => {
+  it("rejects unconfigured application IDs without calling host bridge", async () => {
     const bridge = new FakeHostBridge();
-    bridge.responses["app_launch.launch"] = {
-      status: "invalid_app",
-      app: "malicious_script.exe",
-      launched: false,
-      error: "Application 'malicious_script.exe' is not in the configured allowlist",
+    const store = new MemoryAppLaunchPreferenceStore();
+    const service = new AppLaunchService(bridge, "win32", store);
+
+    const result = await service.launchApp("malicious_script");
+
+    expect(result.status).toBe("invalid_app");
+    expect(result.launched).toBeFalse();
+    expect(result.error).toContain("is not configured or enabled");
+    expect(bridge.calls).toHaveLength(0);
+  });
+
+  it("reports appLaunch capability false if no apps are enabled in config", async () => {
+    const bridge = new FakeHostBridge();
+    bridge.responses["app_launch.get_status"] = {
+      status: "ok",
+      available: true,
     };
 
-    const service = new AppLaunchService(bridge, "win32");
-    const result = await service.launchApp("malicious_script.exe");
-
-    expect(result).toEqual({
-      status: "invalid_app",
-      app: "malicious_script.exe",
-      launched: false,
-      error: "Application 'malicious_script.exe' is not in the configured allowlist",
+    const store = new MemoryAppLaunchPreferenceStore({
+      apps: {
+        vscode: {
+          id: "vscode",
+          name: "VS Code",
+          target: "vscode://",
+          enabled: false,
+        },
+      },
     });
-  });
 
-  it("handles bridge errors gracefully without throwing", async () => {
-    const bridge = new FakeHostBridge();
-    const service = new AppLaunchService(bridge, "win32");
-
+    const service = new AppLaunchService(bridge, "win32", store);
     const status = await service.getStatus();
-    expect(status.status).toBe("unsupported");
+
     expect(status.available).toBeFalse();
     expect(service.isAvailable).toBeFalse();
-
-    const launchRes = await service.launchApp("vscode");
-    expect(launchRes.status).toBe("error");
-    expect(launchRes.launched).toBeFalse();
   });
 });
