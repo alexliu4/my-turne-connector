@@ -5,6 +5,10 @@ import {
   type MacroPreferenceStore,
   FileSystemMacroPreferenceStore,
 } from "./macro-config";
+import {
+  type AppLaunchPreferenceStore,
+  FileSystemAppLaunchPreferenceStore,
+} from "./app-launch-config";
 
 const log = createLogger("MacroService");
 const MACRO_RPC_TIMEOUT_MS = 2_000;
@@ -34,6 +38,7 @@ export class MacroService {
     private readonly hostBridge: HostBridgeClient,
     private readonly platform: NodeJS.Platform = process.platform,
     private readonly preferenceStore: MacroPreferenceStore = new FileSystemMacroPreferenceStore(),
+    private readonly appLaunchPreferenceStore: AppLaunchPreferenceStore = new FileSystemAppLaunchPreferenceStore(),
   ) {}
 
   get isAvailable(): boolean {
@@ -117,10 +122,34 @@ export class MacroService {
       };
     }
 
-    const payload = {
-      id: macroDef.id,
-      ...macroDef.action,
-    };
+    let payload: Record<string, unknown>;
+
+    if (macroDef.action.type === "app") {
+      const appConfig = this.appLaunchPreferenceStore.load();
+      const appDef = appConfig.apps[macroDef.action.appId];
+
+      if (!appDef || appDef.enabled === false) {
+        log.warn(`Rejecting app macro ${macroId}: target app ${macroDef.action.appId} is unconfigured or disabled`);
+        return {
+          status: "invalid_action",
+          error: `App '${macroDef.action.appId}' configured in macro '${macroId}' is not configured or enabled`,
+        };
+      }
+
+      payload = {
+        id: macroDef.id,
+        type: "app",
+        app: appDef.id,
+        appId: appDef.id,
+        target: appDef.target,
+        fallbacks: appDef.fallbacks ?? [],
+      };
+    } else {
+      payload = {
+        id: macroDef.id,
+        ...macroDef.action,
+      };
+    }
 
     try {
       const response = await this.callHostWithTimeout("macros.execute", payload);

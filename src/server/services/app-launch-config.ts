@@ -65,7 +65,7 @@ export const DEFAULT_APP_LAUNCH_CONFIG: AppLaunchConfig = {
       name: "Terminal",
       target: "wt.exe",
       fallbacks: ["cmd.exe"],
-      enabled: true,
+      enabled: false,
     },
     calc: {
       id: "calc",
