@@ -6,6 +6,8 @@ mod discord;
 mod media;
 #[path = "security.rs"]
 mod security;
+#[path = "system_stats.rs"]
+mod system_stats;
 
 use crate::bridge::BridgeServer;
 use serde_json::Value;
@@ -15,6 +17,7 @@ pub struct WindowsNativeState {
     bluetooth: Arc<bluetooth::WindowsBluetoothState>,
     discord: Arc<discord::WindowsDiscordState>,
     media: Arc<media::WindowsMediaState>,
+    system_stats: Arc<system_stats::WindowsSystemStatsState>,
 }
 
 impl WindowsNativeState {
@@ -23,6 +26,7 @@ impl WindowsNativeState {
             bluetooth: Arc::new(bluetooth::WindowsBluetoothState::new()),
             discord: Arc::new(discord::WindowsDiscordState::new()),
             media: Arc::new(media::WindowsMediaState::new()),
+            system_stats: Arc::new(system_stats::WindowsSystemStatsState::new()),
         }
     }
 
@@ -53,6 +57,13 @@ impl WindowsNativeState {
         }
         if method.starts_with("discord.") {
             return self.discord.dispatch(method, params).await;
+        }
+        if method.starts_with("system_stats.")
+            || method.starts_with("systemStats.")
+            || method.starts_with("stats.")
+            || method == "system.get_stats"
+        {
+            return self.system_stats.dispatch(method, params).await;
         }
         if method == "security.protect" {
             let value = params

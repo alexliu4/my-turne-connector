@@ -243,7 +243,7 @@ describe("capabilities", () => {
       systemMediaPreferenceStore: memoryStore,
     });
 
-    // Before start / verification, volume, media, and discord are false
+    // Before start / verification, volume, media, discord, and systemStats are false
     expect(manager.getCapabilities()).toEqual({
       volume: false,
       media: false,

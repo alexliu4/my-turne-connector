@@ -32,6 +32,7 @@ import {
   type SystemMediaPreferenceStore,
 } from "./services/system-media-service";
 import { DiscordService } from "./services/discord-service";
+import { SystemStatsService } from "./services/system-stats-service";
 
 const log = createLogger("NocturneManager");
 const KEEP_ALIVE_RPC_TIMEOUT_MS = 5_000;
@@ -94,6 +95,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
   readonly setupStateService = new SetupStateService();
   readonly systemMediaService: SystemMediaService | null;
   readonly discordService: DiscordService | null;
+  readonly systemStatsService: SystemStatsService | null;
 
   private connections = new Map<string, DeviceConnection>();
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -140,6 +142,9 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       : null;
     this.discordService = dependencies.hostBridge
       ? new DiscordService(dependencies.hostBridge)
+      : null;
+    this.systemStatsService = dependencies.hostBridge
+      ? new SystemStatsService(dependencies.hostBridge, this.platform)
       : null;
 
     this.authService.onAuthStateChange(async (user) => {
@@ -220,6 +225,11 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     if (this.discordService) {
       void this.discordService.start().catch((err) => {
         log.warn(`Background Discord detection failed: ${errorMessage(err)}`);
+      });
+    }
+    if (this.systemStatsService) {
+      void this.systemStatsService.start().catch((err) => {
+        log.warn(`Background system stats detection failed: ${errorMessage(err)}`);
       });
     }
     await this.bluetoothService.initialize();
@@ -647,6 +657,29 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         const res = await this.systemMediaService.setVolume(val);
         if (res) return { result: res };
         return { result: { status: "unsupported" } };
+      }
+
+      if (
+        method === "system_stats.get" ||
+        method === "systemStats.get" ||
+        method === "stats.get" ||
+        method === "system.get_stats"
+      ) {
+        if (!this.systemStatsService) {
+          return {
+            result: {
+              status: "unsupported",
+              available: false,
+              cpu_percent: null,
+              memory_percent: null,
+              memory_used_bytes: null,
+              memory_total_bytes: null,
+              gpu_percent: null,
+            },
+          };
+        }
+        const res = await this.systemStatsService.getStats();
+        return { result: res };
       }
 
       if (method === "discord.get_status" || method === "discord.get_state") {
@@ -1293,11 +1326,12 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     const mediaActive = this.systemMediaService?.isActive ?? false;
     const volumeSupported = this.systemMediaService?.isVolumeSupported ?? false;
     const discordSupported = this.discordService?.isAvailable ?? false;
+    const statsSupported = this.systemStatsService?.isAvailable ?? false;
     return {
       volume: volumeSupported,
       media: mediaActive,
       discord: discordSupported,
-      systemStats: false,
+      systemStats: statsSupported,
       macros: false,
       appLaunch: false,
     };
