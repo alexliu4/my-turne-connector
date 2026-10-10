@@ -106,6 +106,18 @@ Before submitting changes, run `just test`, `just lint`, and
 `cd src && bun run build`. The lint command uses the installed TypeScript
 compiler to check types and reject unused locals and parameters.
 
+### Continuous Integration (CI)
+
+A GitHub Actions workflow (`.github/workflows/windows-ci.yml`) runs on `windows-latest` runners to validate native Windows Connector builds and backend TypeScript logic.
+
+- **Triggers**: Pushes to `main`, pull requests targeting `main`, or manual `workflow_dispatch`.
+- **Checks executed**:
+  - `cargo check --locked --manifest-path windows/Cargo.toml`
+  - `cargo test --release --locked --manifest-path windows/Cargo.toml`
+  - `cd src && bun run check`
+  - `cd src && bun test`
+- **Inspecting Failures**: Open the **Actions** tab on GitHub, select the **Windows CI** workflow run for your commit or pull request, and expand the failing step (e.g., Cargo test or Bun test) to view detailed logs and error output.
+
 ## Updating
 
 Connector images use an A/B root partition layout. The boot partition runs U-Boot, which selects either root slot A or B and rolls back to the previous slot if a new slot fails to boot twice.

@@ -1,0 +1,60 @@
+name: Windows CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate-windows:
+    name: Windows Connector Validation
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.85.0
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: windows -> target
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Bun dependencies
+        run: |
+          cd src
+          bun install --frozen-lockfile
+
+      - name: Cargo check
+        run: cargo check --locked --manifest-path windows/Cargo.toml
+
+      - name: Cargo test
+        run: cargo test --release --locked --manifest-path windows/Cargo.toml
+
+      - name: Bun check
+        run: |
+          cd src
+          bun run check
+
+      - name: Bun test
+        run: |
+          cd src
+          bun test
