@@ -30,21 +30,32 @@ Function .onInit
   ${Else}
     StrCpy $0 "x86"
   ${EndIf}
+!ifdef ARM64ROOT
   ${If} $0 == "x86"
     MessageBox MB_ICONSTOP "Nocturne Connector requires Windows x64 or ARM64."
     Abort
   ${EndIf}
+!else
+  ${If} $0 != "x64"
+    MessageBox MB_ICONSTOP "This installer requires Windows x64."
+    Abort
+  ${EndIf}
+!endif
 FunctionEnd
 
 Section "Nocturne Connector" SecMain
   nsExec::ExecToLog 'taskkill /F /T /IM Nocturne.Connector.exe'
   nsExec::ExecToLog 'taskkill /F /T /IM nocturne-connector-server.exe'
   SetOutPath "$INSTDIR"
+!ifdef ARM64ROOT
   ${If} $0 == "arm64"
     File /r "${ARM64ROOT}\*"
   ${Else}
     File /r "${X64ROOT}\*"
   ${EndIf}
+!else
+  File /r "${X64ROOT}\*"
+!endif
   CreateDirectory "$SMPROGRAMS\Nocturne Connector"
   CreateShortCut "$SMPROGRAMS\Nocturne Connector\Nocturne Connector.lnk" "$INSTDIR\Nocturne.Connector.exe"
   WriteUninstaller "$INSTDIR\Uninstall.exe"

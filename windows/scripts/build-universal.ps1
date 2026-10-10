@@ -12,12 +12,13 @@ $cargoTargetRoot = if ($env:CARGO_TARGET_DIR) {
   Join-Path $windowsRoot "target"
 }
 
-New-Item -ItemType Directory -Force -Path $x64Root, $arm64Root, $bundlesRoot | Out-Null
-
 $serverRoot = Join-Path $windowsRoot "binaries"
 Set-Location $windowsRoot
 
 $x64Only = $env:NOCTURNE_X64_ONLY -eq "true" -or $env:NOCTURNE_BUILD_X64_ONLY -eq "true" -or $env:NOCTURNE_X64_ONLY -eq "1"
+
+$targetDirectories = if ($x64Only) { @($x64Root, $bundlesRoot) } else { @($x64Root, $arm64Root, $bundlesRoot) }
+New-Item -ItemType Directory -Force -Path $targetDirectories | Out-Null
 
 function Invoke-CargoTarget([string]$target) {
   $arguments = @(
@@ -108,9 +109,34 @@ Copy-Item (Join-Path $serverRoot "client") (Join-Path $x64Root "client") -Recurs
 if (-not $x64Only) {
   Remove-Item (Join-Path $arm64Root "client") -Recurse -Force -ErrorAction SilentlyContinue
   Copy-Item (Join-Path $serverRoot "client") (Join-Path $arm64Root "client") -Recurse -Force
-} else {
-  Remove-Item (Join-Path $arm64Root "*") -Recurse -Force -ErrorAction SilentlyContinue
-  Copy-Item (Join-Path $x64Root "*") $arm64Root -Recurse -Force
+}
+
+$requiredX64Files = @(
+  (Join-Path $x64Root "Nocturne.Connector.exe"),
+  (Join-Path $x64Root "nocturne-connector-server.exe"),
+  (Join-Path $x64Root "WebView2Loader.dll"),
+  (Join-Path $x64Root "vcruntime140.dll"),
+  (Join-Path $x64Root "client\index.html")
+)
+foreach ($file in $requiredX64Files) {
+  if (-not (Test-Path $file)) {
+    throw "Required x64 component missing prior to installer packaging: $file"
+  }
+}
+
+if (-not $x64Only) {
+  $requiredArm64Files = @(
+    (Join-Path $arm64Root "Nocturne.Connector.exe"),
+    (Join-Path $arm64Root "nocturne-connector-server.exe"),
+    (Join-Path $arm64Root "WebView2Loader.dll"),
+    (Join-Path $arm64Root "vcruntime140.dll"),
+    (Join-Path $arm64Root "client\index.html")
+  )
+  foreach ($file in $requiredArm64Files) {
+    if (-not (Test-Path $file)) {
+      throw "Required ARM64 component missing prior to installer packaging: $file"
+    }
+  }
 }
 
 $nsis = Get-Command makensis -ErrorAction SilentlyContinue
@@ -119,7 +145,8 @@ if ($null -eq $nsis) {
     (Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"),
     (Join-Path $env:ProgramFiles "NSIS\makensis.exe"),
     "C:\Program Files (x86)\NSIS\makensis.exe",
-    "C:\Program Files\NSIS\makensis.exe"
+    "C:\Program Files\NSIS\makensis.exe",
+    "C:\ProgramData\chocolatey\bin\makensis.exe"
   )
   foreach ($path in $candidatePaths) {
     if ($path -and (Test-Path $path)) {
@@ -167,11 +194,20 @@ function Sign-Artifact([string]$path) {
   }
 }
 
-Get-ChildItem $x64Root, $arm64Root -Recurse -Include *.exe, *.dll | ForEach-Object {
+$rootsToSign = if ($x64Only) { @($x64Root) } else { @($x64Root, $arm64Root) }
+Get-ChildItem $rootsToSign -Recurse -Include *.exe, *.dll | ForEach-Object {
   Sign-Artifact $_.FullName
 }
-& $nsisPath "/DVERSION=$version" "/DX64ROOT=$x64Root" "/DARM64ROOT=$arm64Root" "/DOUTFILE=$output" (Join-Path $PSScriptRoot "universal-installer.nsi")
+
+$nsisArgs = @("/DVERSION=$version", "/DX64ROOT=$x64Root")
+if (-not $x64Only) {
+  $nsisArgs += "/DARM64ROOT=$arm64Root"
+}
+$nsisArgs += "/DOUTFILE=$output"
+$nsisArgs += (Join-Path $PSScriptRoot "universal-installer.nsi")
+
+& $nsisPath @nsisArgs
 if ($LASTEXITCODE -ne 0) {
-  throw "Universal installer build failed with exit code $LASTEXITCODE."
+  throw "Installer build failed with exit code $LASTEXITCODE."
 }
 Sign-Artifact $output

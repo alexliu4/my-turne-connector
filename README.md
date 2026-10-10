@@ -67,7 +67,9 @@
    - For PR or main test builds: Go to the repository's **Actions** tab, select the **Windows Build** run for your commit or PR, scroll down to **Artifacts**, and download the `nocturne-connector-windows-x64-<commit-sha>` ZIP archive.
 2. **Install**:
    - Extract the downloaded ZIP archive (if using a test build from Actions) and run `nocturne-connector_<version>_windows_setup.exe`.
-   - *Note on Unsigned Builds / Smart App Control*: Test builds produced by GitHub Actions are unsigned. Windows SmartScreen or Smart App Control may block execution; click **More info** -> **Run anyway** (or temporarily pause SAC) to install test builds.
+   - *Note on Unsigned Test Builds*:
+     - **Windows Defender SmartScreen**: Unsigned test builds trigger a SmartScreen warning. Click **More info** -> **Run anyway** to proceed with installation.
+     - **Smart App Control**: Smart App Control blocks unsigned binaries on systems where active, and does not offer a per-app "Run anyway" override. Official release binaries are signed.
 3. **Launch & Setup**:
    - Start Nocturne Connector from the Start menu.
    - Follow the on-screen instructions to finish setting up Nocturne Connector.

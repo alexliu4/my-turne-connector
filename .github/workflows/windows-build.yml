@@ -47,6 +47,10 @@ jobs:
           cd src
           bun install --frozen-lockfile
 
+      - name: Install NSIS
+        run: |
+          choco install nsis --no-progress
+
       - name: Build frontend and Bun server sidecar
         env:
           NOCTURNE_X64_ONLY: "true"
