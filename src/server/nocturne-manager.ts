@@ -33,6 +33,8 @@ import {
 } from "./services/system-media-service";
 import { DiscordService } from "./services/discord-service";
 import { SystemStatsService } from "./services/system-stats-service";
+import { AppLaunchService } from "./services/app-launch-service";
+import { MacroService } from "./services/macro-service";
 
 const log = createLogger("NocturneManager");
 const KEEP_ALIVE_RPC_TIMEOUT_MS = 5_000;
@@ -96,6 +98,8 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
   readonly systemMediaService: SystemMediaService | null;
   readonly discordService: DiscordService | null;
   readonly systemStatsService: SystemStatsService | null;
+  readonly appLaunchService: AppLaunchService | null;
+  readonly macroService: MacroService | null;
 
   private connections = new Map<string, DeviceConnection>();
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -145,6 +149,12 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       : null;
     this.systemStatsService = dependencies.hostBridge
       ? new SystemStatsService(dependencies.hostBridge, this.platform)
+      : null;
+    this.appLaunchService = dependencies.hostBridge
+      ? new AppLaunchService(dependencies.hostBridge, this.platform)
+      : null;
+    this.macroService = dependencies.hostBridge
+      ? new MacroService(dependencies.hostBridge, this.platform)
       : null;
 
     this.authService.onAuthStateChange(async (user) => {
@@ -230,6 +240,16 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     if (this.systemStatsService) {
       void this.systemStatsService.start().catch((err) => {
         log.warn(`Background system stats detection failed: ${errorMessage(err)}`);
+      });
+    }
+    if (this.appLaunchService) {
+      void this.appLaunchService.start().catch((err) => {
+        log.warn(`Background app launch detection failed: ${errorMessage(err)}`);
+      });
+    }
+    if (this.macroService) {
+      void this.macroService.start().catch((err) => {
+        log.warn(`Background macro detection failed: ${errorMessage(err)}`);
       });
     }
     await this.bluetoothService.initialize();
@@ -657,6 +677,49 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         const res = await this.systemMediaService.setVolume(val);
         if (res) return { result: res };
         return { result: { status: "unsupported" } };
+      }
+
+      if (
+        method === "app.launch" ||
+        method === "app_launch.launch" ||
+        method === "appLaunch.launch"
+      ) {
+        if (!this.appLaunchService) return { result: { status: "unsupported", launched: false } };
+        const app = p.app ?? p.id ?? p.name;
+        if (typeof app !== "string" || !app) {
+          return { result: { status: "invalid_app", launched: false, error: "Missing application identifier" } };
+        }
+        const res = await this.appLaunchService.launchApp(app);
+        return { result: res };
+      }
+
+      if (
+        method === "app.get_status" ||
+        method === "app_launch.get_status" ||
+        method === "appLaunch.get_status"
+      ) {
+        if (!this.appLaunchService) return { result: { status: "unsupported", available: false, apps: [] } };
+        const res = await this.appLaunchService.getStatus();
+        return { result: res };
+      }
+
+      if (
+        method === "macro.execute" ||
+        method === "macros.execute" ||
+        method === "macro.run"
+      ) {
+        if (!this.macroService) return { result: { status: "unsupported" } };
+        const res = await this.macroService.executeMacro(p);
+        return { result: res };
+      }
+
+      if (
+        method === "macro.get_status" ||
+        method === "macros.get_status"
+      ) {
+        if (!this.macroService) return { result: { status: "unsupported", available: false } };
+        const res = await this.macroService.getStatus();
+        return { result: res };
       }
 
       if (
@@ -1327,13 +1390,15 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     const volumeSupported = this.systemMediaService?.isVolumeSupported ?? false;
     const discordSupported = this.discordService?.isAvailable ?? false;
     const statsSupported = this.systemStatsService?.isAvailable ?? false;
+    const appLaunchSupported = this.appLaunchService?.isAvailable ?? false;
+    const macrosSupported = this.macroService?.isAvailable ?? false;
     return {
       volume: volumeSupported,
       media: mediaActive,
       discord: discordSupported,
       systemStats: statsSupported,
-      macros: false,
-      appLaunch: false,
+      macros: macrosSupported,
+      appLaunch: appLaunchSupported,
     };
   }
 

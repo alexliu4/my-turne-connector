@@ -475,3 +475,61 @@ test("Discord absent responses consistently report unknown mute state", async ()
     } });
   }
 });
+
+describe("app launch and macro capabilities and RPCs", () => {
+  test("dispatches app.launch and macro.execute RPCs and updates capabilities when verified", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    const mockHostBridge: any = {
+      call: async (method: string, params: any) => {
+        if (method === "app_launch.get_status") {
+          return { status: "ok", available: true, apps: ["vscode", "discord", "browser"] };
+        }
+        if (method === "app_launch.launch") {
+          return { status: "ok", app: params?.app, launched: true };
+        }
+        if (method === "macros.get_status") {
+          return { status: "ok", available: true };
+        }
+        if (method === "macros.execute") {
+          return { status: "ok", action: params?.action, launched: true };
+        }
+        return { status: "ok" };
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+
+    const manager = new NocturneManager({ platform: "win32", hostBridge: mockHostBridge, bluetoothService: fakeBluetoothService });
+
+    expect(manager.getCapabilities().appLaunch).toBeFalse();
+    expect(manager.getCapabilities().macros).toBeFalse();
+
+    await manager.appLaunchService?.getStatus();
+    await manager.macroService?.getStatus();
+
+    expect(manager.getCapabilities().appLaunch).toBeTrue();
+    expect(manager.getCapabilities().macros).toBeTrue();
+
+    const launchRes = await manager.onCall("1", "app.launch", { app: "vscode" });
+    expect(launchRes).toEqual({
+      result: { status: "ok", app: "vscode", launched: true },
+    });
+
+    const macroRes = await manager.onCall("2", "macro.execute", { action: "app", app: "vscode" });
+    expect(macroRes).toEqual({
+      result: { status: "ok", action: "app", launched: true },
+    });
+  });
+
+  test("handles absent appLaunchService and macroService gracefully", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    const manager = new NocturneManager({ platform: "linux", bluetoothService: fakeBluetoothService });
+
+    expect(await manager.onCall("1", "app.launch", { app: "vscode" })).toEqual({
+      result: { status: "unsupported", launched: false },
+    });
+    expect(await manager.onCall("2", "macro.execute", { action: "app" })).toEqual({
+      result: { status: "unsupported" },
+    });
+  });
+});

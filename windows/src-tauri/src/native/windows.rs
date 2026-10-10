@@ -4,6 +4,10 @@ mod bluetooth;
 mod discord;
 #[path = "media.rs"]
 mod media;
+#[path = "app_launch.rs"]
+mod app_launch;
+#[path = "macros.rs"]
+mod macros;
 #[path = "security.rs"]
 mod security;
 #[path = "system_stats.rs"]
@@ -18,6 +22,8 @@ pub struct WindowsNativeState {
     discord: Arc<discord::WindowsDiscordState>,
     media: Arc<media::WindowsMediaState>,
     system_stats: Arc<system_stats::WindowsSystemStatsState>,
+    app_launch: Arc<app_launch::WindowsAppLaunchState>,
+    macros: Arc<macros::WindowsMacroState>,
 }
 
 impl WindowsNativeState {
@@ -27,6 +33,8 @@ impl WindowsNativeState {
             discord: Arc::new(discord::WindowsDiscordState::new()),
             media: Arc::new(media::WindowsMediaState::new()),
             system_stats: Arc::new(system_stats::WindowsSystemStatsState::new()),
+            app_launch: Arc::new(app_launch::WindowsAppLaunchState::new()),
+            macros: Arc::new(macros::WindowsMacroState::new()),
         }
     }
 
@@ -64,6 +72,18 @@ impl WindowsNativeState {
             || method == "system.get_stats"
         {
             return self.system_stats.dispatch(method, params).await;
+        }
+        if method.starts_with("app_launch.")
+            || method.starts_with("appLaunch.")
+            || method.starts_with("app.")
+        {
+            return self.app_launch.dispatch(method, params).await;
+        }
+        if method.starts_with("macros.") || method.starts_with("macro.") {
+            return self
+                .macros
+                .dispatch(bridge, &self.app_launch, &self.media, method, params)
+                .await;
         }
         if method == "security.protect" {
             let value = params
