@@ -62,10 +62,20 @@
 <details>
 <summary><img src="https://usenocturne.com/favicon.ico" height="14" style="vertical-align: middle;"> Windows 10+ </summary>
 
-1. Download the setup .exe from the [latest release](https://github.com/usenocturne/nocturne-connector/releases/latest).
-2. Run the installer.
-3. Start Nocturne Connector from the Start menu.
-4. Finish setting up Nocturne Connector by following the steps on screen.
+1. **Download the application**:
+   - For official releases: Download the setup `.exe` from the [latest release](https://github.com/usenocturne/nocturne-connector/releases/latest).
+   - For PR or main test builds: Go to the repository's **Actions** tab, select the **Windows Build** run for your commit or PR, scroll down to **Artifacts**, and download the `nocturne-connector-windows-x64-<commit-sha>` ZIP archive.
+2. **Install**:
+   - Extract the downloaded ZIP archive (if using a test build from Actions) and run `nocturne-connector_<version>_windows_setup.exe`.
+   - *Note on Unsigned Test Builds*:
+     - **Windows Defender SmartScreen**: Unsigned test builds trigger a SmartScreen warning. Click **More info** -> **Run anyway** to proceed with installation.
+     - **Smart App Control**: Smart App Control blocks unsigned binaries on systems where active, and does not offer a per-app "Run anyway" override. Official release binaries are signed.
+3. **Launch & Setup**:
+   - Start Nocturne Connector from the Start menu.
+   - Follow the on-screen instructions to finish setting up Nocturne Connector.
+4. **Updating / Replacing Test Builds**:
+   - New commits on `main` or PRs produce new downloadable artifacts in GitHub Actions; test builds do not automatically update in-app.
+   - To update or replace an existing test build, download the new installer artifact from Actions and run it. The installer automatically stops any running connector processes, updates the application files in `%LOCALAPPDATA%\Nocturne\Connector\App`, and restarts the Connector.
 
 </details>
 
@@ -106,17 +116,15 @@ Before submitting changes, run `just test`, `just lint`, and
 `cd src && bun run build`. The lint command uses the installed TypeScript
 compiler to check types and reject unused locals and parameters.
 
-### Continuous Integration (CI)
+### Continuous Integration (CI) & Workflows
 
-A GitHub Actions workflow (`.github/workflows/windows-ci.yml`) runs on `windows-latest` runners to validate native Windows Connector builds and backend TypeScript logic.
+GitHub Actions workflows run on `windows-latest` runners:
+
+- **Windows CI Validation** (`.github/workflows/windows-ci.yml`): Validates native Windows Connector builds and backend TypeScript logic (`cargo check`, `cargo test`, `bun run check`, `bun test`).
+- **Windows Build** (`.github/workflows/windows-build.yml`): Compiles the frontend, Bun server sidecar, native host, and packages an installable Windows x64 NSIS setup executable (`nocturne-connector-windows-x64-<sha>`), uploaded as a workflow artifact retained for 14 days.
 
 - **Triggers**: Pushes to `main`, pull requests targeting `main`, or manual `workflow_dispatch`.
-- **Checks executed**:
-  - `cargo check --locked --manifest-path windows/Cargo.toml`
-  - `cargo test --release --locked --manifest-path windows/Cargo.toml`
-  - `cd src && bun run check`
-  - `cd src && bun test`
-- **Inspecting Failures**: Open the **Actions** tab on GitHub, select the **Windows CI** workflow run for your commit or pull request, and expand the failing step (e.g., Cargo test or Bun test) to view detailed logs and error output.
+- **Inspecting Runs**: Open the **Actions** tab on GitHub, select the appropriate workflow run for your commit or pull request, and view execution logs or download build artifacts.
 
 ## Updating
 
