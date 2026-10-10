@@ -17,6 +17,8 @@ New-Item -ItemType Directory -Force -Path $x64Root, $arm64Root, $bundlesRoot | O
 $serverRoot = Join-Path $windowsRoot "binaries"
 Set-Location $windowsRoot
 
+$x64Only = $env:NOCTURNE_X64_ONLY -eq "true" -or $env:NOCTURNE_BUILD_X64_ONLY -eq "true" -or $env:NOCTURNE_X64_ONLY -eq "1"
+
 function Invoke-CargoTarget([string]$target) {
   $arguments = @(
     "build", "--manifest-path", (Join-Path $windowsRoot "Cargo.toml"),
@@ -42,9 +44,17 @@ function Copy-HostRuntime([string]$target, [string]$targetTriple, [string]$archi
   Copy-Item $loader.FullName (Join-Path $destination "WebView2Loader.dll") -Force
 
   $runtimeName = if ($architecture -eq "arm64") { "arm64" } else { "x64" }
-  $runtime = Get-ChildItem (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio") -Recurse -Filter "vcruntime140.dll" -ErrorAction SilentlyContinue |
-    Where-Object { $_.FullName -match "\\$runtimeName\\Microsoft\.VC143\.CRT\\vcruntime140\.dll$" } |
-    Select-Object -First 1
+  $vsPaths = @(
+    (Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio"),
+    (Join-Path $env:ProgramFiles "Microsoft Visual Studio")
+  ) | Where-Object { $_ -and (Test-Path $_) }
+  $runtime = $null
+  foreach ($vsPath in $vsPaths) {
+    $runtime = Get-ChildItem $vsPath -Recurse -Filter "vcruntime140.dll" -ErrorAction SilentlyContinue |
+      Where-Object { $_.FullName -match "\\$runtimeName\\Microsoft\.VC143\.CRT\\vcruntime140\.dll$" } |
+      Select-Object -First 1
+    if ($null -ne $runtime) { break }
+  }
   if ($null -ne $runtime) {
     Copy-Item $runtime.FullName (Join-Path $destination "vcruntime140.dll") -Force
     $runtimeOne = Join-Path $runtime.DirectoryName "vcruntime140_1.dll"
@@ -67,18 +77,20 @@ function Copy-HostRuntime([string]$target, [string]$targetTriple, [string]$archi
 if (-not (Test-Path (Join-Path $serverRoot "nocturne-connector-server-x64.exe"))) {
   throw "The x64 Bun server sidecar is missing. Run the server-build recipe first."
 }
-if (-not (Test-Path (Join-Path $serverRoot "nocturne-connector-server-arm64.exe"))) {
+if (-not $x64Only -and -not (Test-Path (Join-Path $serverRoot "nocturne-connector-server-arm64.exe"))) {
   throw "The ARM64 Bun server sidecar is missing. Run the server-build recipe first."
 }
 
-$env:NOCTURNE_SERVER_EXECUTABLE = Join-Path $serverRoot "nocturne-connector-server-arm64.exe"
-if ($arm64Target -like "*gnullvm" -and $env:NOCTURNE_ARM64_LINKER) {
-  $env:CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_LINKER = $env:NOCTURNE_ARM64_LINKER
+if (-not $x64Only) {
+  $env:NOCTURNE_SERVER_EXECUTABLE = Join-Path $serverRoot "nocturne-connector-server-arm64.exe"
+  if ($arm64Target -like "*gnullvm" -and $env:NOCTURNE_ARM64_LINKER) {
+    $env:CARGO_TARGET_AARCH64_PC_WINDOWS_GNULLVM_LINKER = $env:NOCTURNE_ARM64_LINKER
+  }
+  Invoke-CargoTarget $arm64Target
+  $armTargetRoot = Join-Path $cargoTargetRoot $arm64Target
+  Copy-Item (Join-Path $armTargetRoot "release\nocturne-connector-windows.exe") (Join-Path $arm64Root "Nocturne.Connector.exe") -Force
+  Copy-HostRuntime $armTargetRoot $arm64Target "arm64" $arm64Root
 }
-Invoke-CargoTarget $arm64Target
-$armTargetRoot = Join-Path $cargoTargetRoot $arm64Target
-Copy-Item (Join-Path $armTargetRoot "release\nocturne-connector-windows.exe") (Join-Path $arm64Root "Nocturne.Connector.exe") -Force
-Copy-HostRuntime $armTargetRoot $arm64Target "arm64" $arm64Root
 
 $env:NOCTURNE_SERVER_EXECUTABLE = Join-Path $serverRoot "nocturne-connector-server-x64.exe"
 Invoke-CargoTarget "x86_64-pc-windows-msvc"
@@ -86,22 +98,38 @@ $x64TargetRoot = Join-Path $cargoTargetRoot "x86_64-pc-windows-msvc"
 Copy-Item (Join-Path $x64TargetRoot "release\nocturne-connector-windows.exe") (Join-Path $x64Root "Nocturne.Connector.exe") -Force
 Copy-HostRuntime $x64TargetRoot "x86_64-pc-windows-msvc" "x64" $x64Root
 
-Copy-Item (Join-Path $serverRoot "nocturne-connector-server-arm64.exe") (Join-Path $arm64Root "nocturne-connector-server.exe") -Force
+if (-not $x64Only) {
+  Copy-Item (Join-Path $serverRoot "nocturne-connector-server-arm64.exe") (Join-Path $arm64Root "nocturne-connector-server.exe") -Force
+}
 Copy-Item (Join-Path $serverRoot "nocturne-connector-server-x64.exe") (Join-Path $x64Root "nocturne-connector-server.exe") -Force
-Remove-Item (Join-Path $arm64Root "client") -Recurse -Force -ErrorAction SilentlyContinue
 Remove-Item (Join-Path $x64Root "client") -Recurse -Force -ErrorAction SilentlyContinue
-Copy-Item (Join-Path $serverRoot "client") (Join-Path $arm64Root "client") -Recurse -Force
 Copy-Item (Join-Path $serverRoot "client") (Join-Path $x64Root "client") -Recurse -Force
+
+if (-not $x64Only) {
+  Remove-Item (Join-Path $arm64Root "client") -Recurse -Force -ErrorAction SilentlyContinue
+  Copy-Item (Join-Path $serverRoot "client") (Join-Path $arm64Root "client") -Recurse -Force
+} else {
+  Remove-Item (Join-Path $arm64Root "*") -Recurse -Force -ErrorAction SilentlyContinue
+  Copy-Item (Join-Path $x64Root "*") $arm64Root -Recurse -Force
+}
 
 $nsis = Get-Command makensis -ErrorAction SilentlyContinue
 if ($null -eq $nsis) {
-  $installedNsis = Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"
-  if (Test-Path $installedNsis) {
-    $nsis = Get-Item $installedNsis
+  $candidatePaths = @(
+    (Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"),
+    (Join-Path $env:ProgramFiles "NSIS\makensis.exe"),
+    "C:\Program Files (x86)\NSIS\makensis.exe",
+    "C:\Program Files\NSIS\makensis.exe"
+  )
+  foreach ($path in $candidatePaths) {
+    if ($path -and (Test-Path $path)) {
+      $nsis = Get-Item $path
+      break
+    }
   }
 }
 if ($null -eq $nsis) {
-  throw "makensis is required to build the universal setup executable."
+  throw "makensis is required to build the setup executable."
 }
 $nsisPath = if ($nsis.PSObject.Properties.Name -contains "Source") {
   $nsis.Source

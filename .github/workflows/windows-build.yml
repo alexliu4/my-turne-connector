@@ -1,0 +1,72 @@
+name: Windows Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    name: Build Windows x64 Installer
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache Rust dependencies
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: windows -> target
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install Bun dependencies
+        run: |
+          cd src
+          bun install --frozen-lockfile
+
+      - name: Build frontend and Bun server sidecar
+        env:
+          NOCTURNE_X64_ONLY: "true"
+        run: |
+          bun windows/scripts/generate-bridge-types.ts
+          cd src
+          bun run build
+          cd ..
+          bun windows/scripts/build-server.ts
+
+      - name: Build Windows x64 package and NSIS installer
+        env:
+          NOCTURNE_X64_ONLY: "true"
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File windows/scripts/build-universal.ps1
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nocturne-connector-windows-x64-${{ github.sha }}
+          path: windows/bundles/nocturne-connector_*_windows_setup.exe
+          retention-days: 14
+          if-no-files-found: error

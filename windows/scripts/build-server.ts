@@ -31,10 +31,17 @@ await Bun.write(
   `import { windowsClientAssets } from "./.windows-client-embed.ts";\nvoid windowsClientAssets;\nimport "./server/index.ts";\n`,
 );
 
-const targets = [
-  ["bun-windows-x64", "x64"],
-  ["bun-windows-arm64", "arm64"],
-] as const;
+const x64Only =
+  process.env.NOCTURNE_X64_ONLY === "true" ||
+  process.env.NOCTURNE_BUILD_X64_ONLY === "true" ||
+  process.env.NOCTURNE_X64_ONLY === "1";
+
+const targets = x64Only
+  ? ([["bun-windows-x64", "x64"]] as const)
+  : ([
+      ["bun-windows-x64", "x64"],
+      ["bun-windows-arm64", "arm64"],
+    ] as const);
 
 try {
   for (const [target, architecture] of targets) {
