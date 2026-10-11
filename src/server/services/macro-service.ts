@@ -47,6 +47,11 @@ export class MacroService {
     return this.isHostVerified && hasConfiguredMacros;
   }
 
+  get configuredMacrosCount(): number {
+    const config = this.preferenceStore.load();
+    return Object.values(config.macros).filter((m) => m.enabled !== false).length;
+  }
+
   async start(): Promise<void> {
     if (this.platform !== "win32") return;
     try {

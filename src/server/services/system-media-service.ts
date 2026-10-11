@@ -140,6 +140,17 @@ export class SystemMediaService {
     return this.volumeSupported;
   }
 
+  get latestState(): { sourceApp: string | null; playbackState: string | null } | null {
+    if (!this.latestNowPlaying) return null;
+    const sourceApp = typeof this.latestNowPlaying.playback_attributes?.PlaybackAppName === "string"
+      ? this.latestNowPlaying.playback_attributes.PlaybackAppName
+      : null;
+    const playbackState = typeof this.latestNowPlaying.playback_attributes?.PlaybackStatus === "string"
+      ? this.latestNowPlaying.playback_attributes.PlaybackStatus
+      : null;
+    return { sourceApp, playbackState };
+  }
+
   async start(): Promise<void> {
     if (this.lifecycleStarted) return;
     this.lifecycleStarted = true;

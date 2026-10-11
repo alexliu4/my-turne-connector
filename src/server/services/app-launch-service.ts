@@ -42,6 +42,11 @@ export class AppLaunchService {
     return this.isHostVerified && hasConfiguredApps;
   }
 
+  get configuredAppsCount(): number {
+    const config = this.preferenceStore.load();
+    return Object.values(config.apps).filter((app) => app.enabled !== false).length;
+  }
+
   async start(): Promise<void> {
     if (this.platform !== "win32") return;
     try {

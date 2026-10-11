@@ -476,6 +476,63 @@ test("Discord absent responses consistently report unknown mute state", async ()
   }
 });
 
+describe("host status", () => {
+  test("returns structured host status via getHostStatus and RPC calls", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    const manager = new NocturneManager({ platform: "win32", bluetoothService: fakeBluetoothService });
+
+    const status = manager.getHostStatus();
+    expect(status).toMatchObject({
+      platform: "win32",
+      connectorPlatform: "windows",
+      connected: false,
+      capabilities: {
+        volume: false,
+        media: false,
+        discord: false,
+        systemStats: false,
+        macros: false,
+        appLaunch: false,
+      },
+      services: {
+        volume: { available: false, volume_percent: null, muted: null },
+        media: { available: false, source: null, playbackState: null },
+        discord: { available: false, running: false, state_known: false, muted: null, deafened: null },
+        systemStats: { available: false, cpu_percent: null, memory_percent: null, gpu_percent: null },
+        appLaunch: { available: false, apps_count: 0 },
+        macros: { available: false, macros_count: 0 },
+      },
+    });
+
+    for (const method of ["host.get_status", "host.status", "connector.get_status", "connector.status"]) {
+      const res = await manager.onCall("1", method, {});
+      expect(res).toEqual({
+        result: {
+          status: "ok",
+          hostStatus: status,
+          host_status: status,
+          ...status,
+        },
+      });
+    }
+  });
+
+  test("includes hostStatus in app.ready broadcast", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    const manager = new NocturneManager({ platform: "win32", bluetoothService: fakeBluetoothService });
+
+    let readyPayload: any = null;
+    (manager as any).broadcastToDevices = async (topic: string, data: any) => {
+      if (topic === "app.ready") readyPayload = data;
+    };
+
+    await (manager as any).sendAppReady();
+
+    expect(readyPayload).toBeDefined();
+    expect(readyPayload.hostStatus).toEqual(manager.getHostStatus());
+  });
+});
+
 describe("app launch and macro capabilities and RPCs", () => {
   test("dispatches app.launch and macro.execute RPCs and updates capabilities when verified", async () => {
     const { NocturneManager } = await import("./nocturne-manager");

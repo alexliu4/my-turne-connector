@@ -35,6 +35,10 @@ export class SystemStatsService {
     return this.isHostVerified;
   }
 
+  get cachedStats(): SystemStats | null {
+    return this.cache?.stats ?? null;
+  }
+
   async start(): Promise<void> {
     if (this.platform !== "win32") return;
     try {
