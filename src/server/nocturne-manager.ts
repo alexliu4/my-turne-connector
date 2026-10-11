@@ -166,6 +166,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
           dependencies.hostBridge,
           this.platform,
           dependencies.macroPreferenceStore,
+          dependencies.appLaunchPreferenceStore,
         )
       : null;
 

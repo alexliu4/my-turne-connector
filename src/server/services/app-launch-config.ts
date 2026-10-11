@@ -136,10 +136,12 @@ function validateAppDefinition(fallbackKey: string, val: unknown): AppDefinition
   const target = typeof rec.target === "string" && rec.target.trim() ? rec.target.trim() : null;
   if (!id || !name || !target) return null;
 
+  if (rec.enabled !== undefined && typeof rec.enabled !== "boolean") return null;
+  const enabled = rec.enabled ?? true;
+
   const fallbacks = Array.isArray(rec.fallbacks)
     ? rec.fallbacks.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : undefined;
-  const enabled = typeof rec.enabled === "boolean" ? rec.enabled : true;
 
   return { id, name, target, fallbacks, enabled };
 }

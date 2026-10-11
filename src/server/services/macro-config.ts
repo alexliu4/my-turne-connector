@@ -140,7 +140,8 @@ function validateMacroDefinition(fallbackKey: string, val: unknown): MacroDefini
   const action = validateMacroAction(rec.action);
   if (!id || !name || !action) return null;
 
-  const enabled = typeof rec.enabled === "boolean" ? rec.enabled : true;
+  if (rec.enabled !== undefined && typeof rec.enabled !== "boolean") return null;
+  const enabled = rec.enabled ?? true;
 
   return { id, name, action, enabled };
 }
