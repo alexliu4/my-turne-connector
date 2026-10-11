@@ -1488,7 +1488,9 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       promises.push(this.macroService.getStatus().catch(() => null));
     }
     if (this.systemMediaService) {
-      promises.push(this.systemMediaService.getVolume().catch(() => null));
+      promises.push(
+        this.systemMediaService.getVolume({ timeoutMs: 2_000 }).catch(() => null),
+      );
     }
     await Promise.allSettled(promises);
     return this.getHostStatus();
@@ -1496,9 +1498,10 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
 
   getHostStatus(): HostStatus {
     const caps = this.getCapabilities();
-    const discordState = this.discordService?.status;
-    const statsState = this.systemStatsService?.cachedStats;
-    const mediaState = this.systemMediaService?.latestState;
+    const discordState = caps.discord ? this.discordService?.status : null;
+    const statsState = caps.systemStats ? this.systemStatsService?.cachedStats : null;
+    const mediaState = caps.media ? this.systemMediaService?.latestState : null;
+    const volumeSupported = caps.volume;
 
     return {
       platform: this.platform,
@@ -1509,35 +1512,43 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       capabilities: caps,
       services: {
         volume: {
-          available: caps.volume,
-          volume_percent: this.systemMediaService?.currentVolumePercent ?? null,
-          muted: this.systemMediaService?.currentMuted ?? null,
+          available: volumeSupported,
+          volume_percent: volumeSupported
+            ? (this.systemMediaService?.currentVolumePercent ?? null)
+            : null,
+          muted: volumeSupported
+            ? (this.systemMediaService?.currentMuted ?? null)
+            : null,
         },
         media: {
           available: caps.media,
-          source: mediaState?.sourceApp ?? null,
-          playbackState: mediaState?.playbackState ?? null,
+          source: caps.media ? (mediaState?.sourceApp ?? null) : null,
+          playbackState: caps.media ? (mediaState?.playbackState ?? null) : null,
         },
         discord: {
           available: caps.discord,
-          running: discordState?.running ?? false,
-          state_known: discordState?.state_known ?? false,
-          muted: discordState?.muted ?? null,
-          deafened: discordState?.deafened ?? null,
+          running: caps.discord ? (discordState?.running ?? false) : false,
+          state_known: caps.discord ? (discordState?.state_known ?? false) : false,
+          muted: caps.discord ? (discordState?.muted ?? null) : null,
+          deafened: caps.discord ? (discordState?.deafened ?? null) : null,
         },
         systemStats: {
           available: caps.systemStats,
-          cpu_percent: statsState?.cpu_percent ?? null,
-          memory_percent: statsState?.memory_percent ?? null,
-          gpu_percent: statsState?.gpu_percent ?? null,
+          cpu_percent: caps.systemStats ? (statsState?.cpu_percent ?? null) : null,
+          memory_percent: caps.systemStats ? (statsState?.memory_percent ?? null) : null,
+          gpu_percent: caps.systemStats ? (statsState?.gpu_percent ?? null) : null,
         },
         appLaunch: {
           available: caps.appLaunch,
-          apps_count: this.appLaunchService?.configuredAppsCount ?? 0,
+          apps_count: caps.appLaunch
+            ? (this.appLaunchService?.configuredAppsCount ?? 0)
+            : 0,
         },
         macros: {
           available: caps.macros,
-          macros_count: this.macroService?.configuredMacrosCount ?? 0,
+          macros_count: caps.macros
+            ? (this.macroService?.configuredMacrosCount ?? 0)
+            : 0,
         },
       },
     };

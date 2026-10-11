@@ -571,6 +571,74 @@ describe("host status", () => {
     expect(refreshed2.services.discord.running).toBeFalse();
   });
 
+  test("successful status refresh followed by a failed native probe turns measurements to null", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    let probeSucceeds = true;
+    const mockBridge: any = {
+      call: async (method: string) => {
+        if (!probeSucceeds) throw new Error("Host native probe failed");
+        if (method === "system_stats.get") {
+          return { status: "ok", available: true, cpu_percent: 25, memory_percent: 50, gpu_percent: 10 };
+        }
+        if (method === "volume.get" || method === "media.get_volume") {
+          return { status: "ok", volume_percent: 80, muted: false };
+        }
+        return { status: "ok" };
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: mockBridge,
+      bluetoothService: fakeBluetoothService,
+    });
+
+    const status1 = await manager.refreshHostStatus();
+    expect(status1.services.systemStats.cpu_percent).toBe(25);
+    expect(status1.services.volume.volume_percent).toBe(80);
+
+    probeSucceeds = false;
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    const status2 = await manager.refreshHostStatus();
+    expect(status2.services.systemStats.available).toBeFalse();
+    expect(status2.services.systemStats.cpu_percent).toBeNull();
+    expect(status2.services.volume.available).toBeFalse();
+    expect(status2.services.volume.volume_percent).toBeNull();
+  });
+
+  test("a stalled volume probe times out within 2 seconds without delaying Host Status for 30s", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    const mockBridge: any = {
+      call: async (method: string, _params: any, options: any) => {
+        if (method === "volume.get" || method === "media.get_volume") {
+          const timeoutMs = options?.timeoutMs ?? 30000;
+          return new Promise((_, reject) => {
+            setTimeout(() => reject(new Error("RPC timed out")), timeoutMs);
+          });
+        }
+        return { status: "ok" };
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: mockBridge,
+      bluetoothService: fakeBluetoothService,
+    });
+
+    const startTime = Date.now();
+    const status = await manager.refreshHostStatus();
+    const duration = Date.now() - startTime;
+
+    expect(duration).toBeLessThan(4000);
+    expect(status.services.volume.available).toBeFalse();
+    expect(status.services.volume.volume_percent).toBeNull();
+  });
+
   test("failed or unavailable service states return null/unknown without exposing stale data", async () => {
     const { NocturneManager } = await import("./nocturne-manager");
     const failingBridge: any = {

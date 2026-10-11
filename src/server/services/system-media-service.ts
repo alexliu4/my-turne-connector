@@ -197,10 +197,11 @@ export class SystemMediaService {
     await this.hostBridge.call("media.set_spotify_linked", { linked });
   }
 
-  async getVolume(): Promise<{ volume_percent: number; muted: boolean } | null> {
+  async getVolume(options?: { timeoutMs?: number }): Promise<{ volume_percent: number; muted: boolean } | null> {
     let response: unknown;
     try {
-      response = await this.hostBridge.call<unknown>("volume.get", {});
+      const callOptions = options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {};
+      response = await this.hostBridge.call<unknown>("volume.get", {}, callOptions);
     } catch (error) {
       this.volumeSupported = false;
       throw error;
