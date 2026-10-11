@@ -54,5 +54,6 @@ windows = { version = "0.61", features = [
   "Win32_System_SystemInformation",
   "Win32_UI_Shell",
   "Win32_UI_Shell_PropertiesSystem",
+  "Win32_UI_WindowsAndMessaging",
 ] }
 windows-core = { version = "0.61", package = "windows-core" }
