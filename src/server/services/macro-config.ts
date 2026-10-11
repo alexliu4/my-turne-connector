@@ -98,7 +98,16 @@ export class FileSystemMacroPreferenceStore implements MacroPreferenceStore {
       if (!parsed || typeof parsed !== "object" || !parsed.macros || typeof parsed.macros !== "object") {
         return DEFAULT_MACROS_CONFIG;
       }
-      return parsed as MacroConfig;
+
+      const validatedMacros: Record<string, MacroDefinition> = {};
+      for (const [key, val] of Object.entries(parsed.macros)) {
+        const macro = validateMacroDefinition(key, val);
+        if (macro) {
+          validatedMacros[macro.id] = macro;
+        }
+      }
+
+      return { macros: validatedMacros };
     } catch (error) {
       log.warn(`Unable to read macros configuration: ${errorMessage(error)}`);
       return DEFAULT_MACROS_CONFIG;
@@ -121,6 +130,53 @@ export class FileSystemMacroPreferenceStore implements MacroPreferenceStore {
       throw error;
     }
   }
+}
+
+function validateMacroDefinition(fallbackKey: string, val: unknown): MacroDefinition | null {
+  if (!val || typeof val !== "object" || Array.isArray(val)) return null;
+  const rec = val as Record<string, unknown>;
+  const id = typeof rec.id === "string" && rec.id.trim() ? rec.id.trim() : fallbackKey.trim();
+  const name = typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : id;
+  const action = validateMacroAction(rec.action);
+  if (!id || !name || !action) return null;
+
+  const enabled = typeof rec.enabled === "boolean" ? rec.enabled : true;
+
+  return { id, name, action, enabled };
+}
+
+function validateMacroAction(val: unknown): MacroActionConfig | null {
+  if (!val || typeof val !== "object" || Array.isArray(val)) return null;
+  const rec = val as Record<string, unknown>;
+  const type = typeof rec.type === "string" ? rec.type.trim() : null;
+  if (!type) return null;
+
+  if (type === "app") {
+    const appId = typeof rec.appId === "string" && rec.appId.trim() ? rec.appId.trim() : null;
+    return appId ? { type: "app", appId } : null;
+  }
+
+  if (type === "media") {
+    const control = typeof rec.control === "string" ? rec.control.trim() : null;
+    const validControls = ["play", "pause", "next", "previous", "toggle", "volume_up", "volume_down"];
+    return control && validControls.includes(control)
+      ? { type: "media", control: control as MediaMacroAction["control"] }
+      : null;
+  }
+
+  if (type === "url") {
+    const url = typeof rec.url === "string" && rec.url.trim() ? rec.url.trim() : null;
+    return url && (url.startsWith("http://") || url.startsWith("https://"))
+      ? { type: "url", url }
+      : null;
+  }
+
+  if (type === "shortcut") {
+    const shortcut = typeof rec.shortcut === "string" && rec.shortcut.trim() ? rec.shortcut.trim() : null;
+    return shortcut ? { type: "shortcut", shortcut } : null;
+  }
+
+  return null;
 }
 
 function errorMessage(error: unknown): string {

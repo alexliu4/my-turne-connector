@@ -94,7 +94,16 @@ export class FileSystemAppLaunchPreferenceStore implements AppLaunchPreferenceSt
       if (!parsed || typeof parsed !== "object" || !parsed.apps || typeof parsed.apps !== "object") {
         return DEFAULT_APP_LAUNCH_CONFIG;
       }
-      return parsed as AppLaunchConfig;
+
+      const validatedApps: Record<string, AppDefinition> = {};
+      for (const [key, val] of Object.entries(parsed.apps)) {
+        const app = validateAppDefinition(key, val);
+        if (app) {
+          validatedApps[app.id] = app;
+        }
+      }
+
+      return { apps: validatedApps };
     } catch (error) {
       log.warn(`Unable to read app launch configuration: ${errorMessage(error)}`);
       return DEFAULT_APP_LAUNCH_CONFIG;
@@ -117,6 +126,22 @@ export class FileSystemAppLaunchPreferenceStore implements AppLaunchPreferenceSt
       throw error;
     }
   }
+}
+
+function validateAppDefinition(fallbackKey: string, val: unknown): AppDefinition | null {
+  if (!val || typeof val !== "object" || Array.isArray(val)) return null;
+  const rec = val as Record<string, unknown>;
+  const id = typeof rec.id === "string" && rec.id.trim() ? rec.id.trim() : fallbackKey.trim();
+  const name = typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : id;
+  const target = typeof rec.target === "string" && rec.target.trim() ? rec.target.trim() : null;
+  if (!id || !name || !target) return null;
+
+  const fallbacks = Array.isArray(rec.fallbacks)
+    ? rec.fallbacks.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
+    : undefined;
+  const enabled = typeof rec.enabled === "boolean" ? rec.enabled : true;
+
+  return { id, name, target, fallbacks, enabled };
 }
 
 function errorMessage(error: unknown): string {

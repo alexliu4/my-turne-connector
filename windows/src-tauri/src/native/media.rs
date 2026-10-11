@@ -679,9 +679,6 @@ impl WindowsMediaState {
     }
 
     async fn control(&self, bridge: &BridgeServer, params: Value) -> Result<Value, String> {
-        if !self.is_enabled() {
-            return Ok(json!({ "status": "disabled" }));
-        }
         let action = params
             .get("action")
             .and_then(Value::as_str)
@@ -709,6 +706,9 @@ impl WindowsMediaState {
                 }
             }
             return Ok(val);
+        }
+        if !self.is_enabled() {
+            return Ok(json!({ "status": "disabled" }));
         }
         let session = self
             .inner
