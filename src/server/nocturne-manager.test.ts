@@ -477,44 +477,131 @@ test("Discord absent responses consistently report unknown mute state", async ()
 });
 
 describe("host status", () => {
-  test("returns structured host status via getHostStatus and RPC calls", async () => {
+  test("returns structured host status via getHostStatus and explicit refresh RPC calls", async () => {
     const { NocturneManager } = await import("./nocturne-manager");
-    const manager = new NocturneManager({ platform: "win32", bluetoothService: fakeBluetoothService });
+    let discordRunning = true;
+    const mockHostBridge: any = {
+      call: async (method: string) => {
+        if (method === "discord.get_status") {
+          return { status: "ok", running: discordRunning, available: discordRunning };
+        }
+        if (method === "system_stats.get") {
+          return { status: "ok", available: true, cpu_percent: 15.5, memory_percent: 42.0, gpu_percent: 8.0 };
+        }
+        if (method === "app_launch.get_status") {
+          return { status: "ok", available: true };
+        }
+        if (method === "macros.get_status") {
+          return { status: "ok", available: true };
+        }
+        if (method === "volume.get" || method === "media.get_volume") {
+          return { status: "ok", volume_percent: 75, muted: false };
+        }
+        return { status: "ok" };
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
 
-    const status = manager.getHostStatus();
-    expect(status).toMatchObject({
+    const mockAppStore: any = {
+      load() {
+        return { apps: { vscode: { id: "vscode", name: "VS Code", enabled: true } } };
+      },
+      save() {},
+    };
+
+    const mockMacroStore: any = {
+      load() {
+        return { macros: { play: { id: "play", name: "Play", action: { type: "media" }, enabled: true } } };
+      },
+      save() {},
+    };
+
+    const manager = new NocturneManager({
       platform: "win32",
-      connectorPlatform: "windows",
-      connected: false,
-      capabilities: {
-        volume: false,
-        media: false,
-        discord: false,
-        systemStats: false,
-        macros: false,
-        appLaunch: false,
-      },
-      services: {
-        volume: { available: false, volume_percent: null, muted: null },
-        media: { available: false, source: null, playbackState: null },
-        discord: { available: false, running: false, state_known: false, muted: null, deafened: null },
-        systemStats: { available: false, cpu_percent: null, memory_percent: null, gpu_percent: null },
-        appLaunch: { available: false, apps_count: 0 },
-        macros: { available: false, macros_count: 0 },
-      },
+      hostBridge: mockHostBridge,
+      bluetoothService: fakeBluetoothService,
+      appLaunchPreferenceStore: mockAppStore,
+      macroPreferenceStore: mockMacroStore,
     });
 
-    for (const method of ["host.get_status", "host.status", "connector.get_status", "connector.status"]) {
-      const res = await manager.onCall("1", method, {});
-      expect(res).toEqual({
-        result: {
-          status: "ok",
-          hostStatus: status,
-          host_status: status,
-          ...status,
-        },
-      });
-    }
+    const initialStatus = manager.getHostStatus();
+    expect(initialStatus.connected).toBeFalse();
+    expect(initialStatus.deviceConnected).toBeFalse();
+    expect(initialStatus.services.systemStats.cpu_percent).toBeNull();
+
+    // Trigger explicit status query which refreshes service states
+    const res = await manager.onCall("1", "host.get_status", {});
+    const refreshed = (res.result as any).hostStatus;
+
+    expect(refreshed.capabilities).toEqual({
+      volume: true,
+      media: false,
+      discord: true,
+      systemStats: true,
+      macros: true,
+      appLaunch: true,
+    });
+    expect(refreshed.services.systemStats).toEqual({
+      available: true,
+      cpu_percent: 15.5,
+      memory_percent: 42.0,
+      gpu_percent: 8.0,
+    });
+    expect(refreshed.services.discord).toEqual({
+      available: true,
+      running: true,
+      state_known: false,
+      muted: null,
+      deafened: null,
+    });
+    expect(refreshed.services.appLaunch.apps_count).toBe(1);
+    expect(refreshed.services.macros.macros_count).toBe(1);
+    expect(refreshed.services.volume).toEqual({
+      available: true,
+      volume_percent: 75,
+      muted: false,
+    });
+
+    // When Discord stops running on next refresh
+    discordRunning = false;
+    const res2 = await manager.onCall("2", "connector.status", {});
+    const refreshed2 = (res2.result as any).hostStatus;
+    expect(refreshed2.services.discord.available).toBeFalse();
+    expect(refreshed2.services.discord.running).toBeFalse();
+  });
+
+  test("failed or unavailable service states return null/unknown without exposing stale data", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    const failingBridge: any = {
+      call: async () => {
+        throw new Error("Bridge RPC failed");
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: failingBridge,
+      bluetoothService: fakeBluetoothService,
+    });
+
+    const res = await manager.onCall("1", "host.get_status", {});
+    const status = (res.result as any).hostStatus;
+
+    expect(status.capabilities).toEqual({
+      volume: false,
+      media: false,
+      discord: false,
+      systemStats: false,
+      macros: false,
+      appLaunch: false,
+    });
+    expect(status.services.volume).toEqual({ available: false, volume_percent: null, muted: null });
+    expect(status.services.media).toEqual({ available: false, source: null, playbackState: null });
+    expect(status.services.discord).toEqual({ available: false, running: false, state_known: false, muted: null, deafened: null });
+    expect(status.services.systemStats).toEqual({ available: false, cpu_percent: null, memory_percent: null, gpu_percent: null });
   });
 
   test("includes hostStatus in app.ready broadcast", async () => {

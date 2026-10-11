@@ -60,6 +60,7 @@ export interface HostStatus {
   connectorPlatform: string | null;
   version: string;
   connected: boolean;
+  deviceConnected: boolean;
   capabilities: ConnectorCapabilities;
   services: {
     volume: {
@@ -703,13 +704,11 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         method === "connector.get_status" ||
         method === "connector.status"
       ) {
-        const hostStatus = this.getHostStatus();
+        const hostStatus = await this.refreshHostStatus();
         return {
           result: {
             status: "ok",
             hostStatus,
-            host_status: hostStatus,
-            ...hostStatus,
           },
         };
       }
@@ -1474,6 +1473,27 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     };
   }
 
+  async refreshHostStatus(): Promise<HostStatus> {
+    const promises: Array<Promise<unknown>> = [];
+    if (this.discordService) {
+      promises.push(this.discordService.getStatus().catch(() => null));
+    }
+    if (this.systemStatsService) {
+      promises.push(this.systemStatsService.getStats().catch(() => null));
+    }
+    if (this.appLaunchService) {
+      promises.push(this.appLaunchService.getStatus().catch(() => null));
+    }
+    if (this.macroService) {
+      promises.push(this.macroService.getStatus().catch(() => null));
+    }
+    if (this.systemMediaService) {
+      promises.push(this.systemMediaService.getVolume().catch(() => null));
+    }
+    await Promise.allSettled(promises);
+    return this.getHostStatus();
+  }
+
   getHostStatus(): HostStatus {
     const caps = this.getCapabilities();
     const discordState = this.discordService?.status;
@@ -1485,6 +1505,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       connectorPlatform: this.platform === "win32" ? "windows" : null,
       version: getConnectorVersion(),
       connected: this.connections.size > 0,
+      deviceConnected: this.connections.size > 0,
       capabilities: caps,
       services: {
         volume: {
