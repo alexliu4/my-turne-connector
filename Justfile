@@ -1,3 +1,5 @@
+set windows-shell := ["cmd.exe", "/c"]
+
 connector-api:
     cd src && bun install && bun run check && bun run build
 
