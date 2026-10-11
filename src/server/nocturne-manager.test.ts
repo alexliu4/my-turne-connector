@@ -476,6 +476,218 @@ test("Discord absent responses consistently report unknown mute state", async ()
   }
 });
 
+describe("host status", () => {
+  test("returns structured host status via getHostStatus and explicit refresh RPC calls", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    let discordRunning = true;
+    const mockHostBridge: any = {
+      call: async (method: string) => {
+        if (method === "discord.get_status") {
+          return { status: "ok", running: discordRunning, available: discordRunning };
+        }
+        if (method === "system_stats.get") {
+          return { status: "ok", available: true, cpu_percent: 15.5, memory_percent: 42.0, gpu_percent: 8.0 };
+        }
+        if (method === "app_launch.get_status") {
+          return { status: "ok", available: true };
+        }
+        if (method === "macros.get_status") {
+          return { status: "ok", available: true };
+        }
+        if (method === "volume.get" || method === "media.get_volume") {
+          return { status: "ok", volume_percent: 75, muted: false };
+        }
+        return { status: "ok" };
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+
+    const mockAppStore: any = {
+      load() {
+        return { apps: { vscode: { id: "vscode", name: "VS Code", enabled: true } } };
+      },
+      save() {},
+    };
+
+    const mockMacroStore: any = {
+      load() {
+        return { macros: { play: { id: "play", name: "Play", action: { type: "media" }, enabled: true } } };
+      },
+      save() {},
+    };
+
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: mockHostBridge,
+      bluetoothService: fakeBluetoothService,
+      appLaunchPreferenceStore: mockAppStore,
+      macroPreferenceStore: mockMacroStore,
+    });
+
+    const initialStatus = manager.getHostStatus();
+    expect(initialStatus.connected).toBeFalse();
+    expect(initialStatus.deviceConnected).toBeFalse();
+    expect(initialStatus.services.systemStats.cpu_percent).toBeNull();
+
+    // Trigger explicit status query which refreshes service states
+    const res = await manager.onCall("1", "host.get_status", {});
+    const refreshed = (res.result as any).hostStatus;
+
+    expect(refreshed.capabilities).toEqual({
+      volume: true,
+      media: false,
+      discord: true,
+      systemStats: true,
+      macros: true,
+      appLaunch: true,
+    });
+    expect(refreshed.services.systemStats).toEqual({
+      available: true,
+      cpu_percent: 15.5,
+      memory_percent: 42.0,
+      gpu_percent: 8.0,
+    });
+    expect(refreshed.services.discord).toEqual({
+      available: true,
+      running: true,
+      state_known: false,
+      muted: null,
+      deafened: null,
+    });
+    expect(refreshed.services.appLaunch.apps_count).toBe(1);
+    expect(refreshed.services.macros.macros_count).toBe(1);
+    expect(refreshed.services.volume).toEqual({
+      available: true,
+      volume_percent: 75,
+      muted: false,
+    });
+
+    // When Discord stops running on next refresh
+    discordRunning = false;
+    const res2 = await manager.onCall("2", "connector.status", {});
+    const refreshed2 = (res2.result as any).hostStatus;
+    expect(refreshed2.services.discord.available).toBeFalse();
+    expect(refreshed2.services.discord.running).toBeFalse();
+  });
+
+  test("successful status refresh followed by a failed native probe turns measurements to null", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    let probeSucceeds = true;
+    const mockBridge: any = {
+      call: async (method: string) => {
+        if (!probeSucceeds) throw new Error("Host native probe failed");
+        if (method === "system_stats.get") {
+          return { status: "ok", available: true, cpu_percent: 25, memory_percent: 50, gpu_percent: 10 };
+        }
+        if (method === "volume.get" || method === "media.get_volume") {
+          return { status: "ok", volume_percent: 80, muted: false };
+        }
+        return { status: "ok" };
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: mockBridge,
+      bluetoothService: fakeBluetoothService,
+    });
+
+    const status1 = await manager.refreshHostStatus();
+    expect(status1.services.systemStats.cpu_percent).toBe(25);
+    expect(status1.services.volume.volume_percent).toBe(80);
+
+    probeSucceeds = false;
+    await new Promise((resolve) => setTimeout(resolve, 1050));
+    const status2 = await manager.refreshHostStatus();
+    expect(status2.services.systemStats.available).toBeFalse();
+    expect(status2.services.systemStats.cpu_percent).toBeNull();
+    expect(status2.services.volume.available).toBeFalse();
+    expect(status2.services.volume.volume_percent).toBeNull();
+  });
+
+  test("a stalled volume probe times out within 2 seconds without delaying Host Status for 30s", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    const mockBridge: any = {
+      call: async (method: string, _params: any, options: any) => {
+        if (method === "volume.get" || method === "media.get_volume") {
+          const timeoutMs = options?.timeoutMs ?? 30000;
+          return new Promise((_, reject) => {
+            setTimeout(() => reject(new Error("RPC timed out")), timeoutMs);
+          });
+        }
+        return { status: "ok" };
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: mockBridge,
+      bluetoothService: fakeBluetoothService,
+    });
+
+    const startTime = Date.now();
+    const status = await manager.refreshHostStatus();
+    const duration = Date.now() - startTime;
+
+    expect(duration).toBeLessThan(4000);
+    expect(status.services.volume.available).toBeFalse();
+    expect(status.services.volume.volume_percent).toBeNull();
+  });
+
+  test("failed or unavailable service states return null/unknown without exposing stale data", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    const failingBridge: any = {
+      call: async () => {
+        throw new Error("Bridge RPC failed");
+      },
+      onEvent: () => () => {},
+      close: () => {},
+    };
+
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: failingBridge,
+      bluetoothService: fakeBluetoothService,
+    });
+
+    const res = await manager.onCall("1", "host.get_status", {});
+    const status = (res.result as any).hostStatus;
+
+    expect(status.capabilities).toEqual({
+      volume: false,
+      media: false,
+      discord: false,
+      systemStats: false,
+      macros: false,
+      appLaunch: false,
+    });
+    expect(status.services.volume).toEqual({ available: false, volume_percent: null, muted: null });
+    expect(status.services.media).toEqual({ available: false, source: null, playbackState: null });
+    expect(status.services.discord).toEqual({ available: false, running: false, state_known: false, muted: null, deafened: null });
+    expect(status.services.systemStats).toEqual({ available: false, cpu_percent: null, memory_percent: null, gpu_percent: null });
+  });
+
+  test("includes hostStatus in app.ready broadcast", async () => {
+    const { NocturneManager } = await import("./nocturne-manager");
+    const manager = new NocturneManager({ platform: "win32", bluetoothService: fakeBluetoothService });
+
+    let readyPayload: any = null;
+    (manager as any).broadcastToDevices = async (topic: string, data: any) => {
+      if (topic === "app.ready") readyPayload = data;
+    };
+
+    await (manager as any).sendAppReady();
+
+    expect(readyPayload).toBeDefined();
+    expect(readyPayload.hostStatus).toEqual(manager.getHostStatus());
+  });
+});
+
 describe("app launch and macro capabilities and RPCs", () => {
   test("dispatches app.launch and macro.execute RPCs and updates capabilities when verified", async () => {
     const { NocturneManager } = await import("./nocturne-manager");

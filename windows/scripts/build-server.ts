@@ -47,6 +47,7 @@ try {
   for (const [target, architecture] of targets) {
     const result = await Bun.build({
       entrypoints: [serverEmbedEntrypoint],
+      target: "bun",
       compile: {
         target,
         outfile: `${output}/nocturne-connector-server-${architecture}.exe`,

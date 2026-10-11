@@ -36,6 +36,17 @@ export class DiscordService {
     return this.isRunning;
   }
 
+  get status(): DiscordStatus {
+    return {
+      status: "ok",
+      available: this.isRunning,
+      running: this.isRunning,
+      state_known: false,
+      muted: null,
+      deafened: null,
+    };
+  }
+
   async start(): Promise<void> {
     await this.refreshStatus();
   }

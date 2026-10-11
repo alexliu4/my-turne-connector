@@ -55,6 +55,48 @@ export interface ConnectorCapabilities {
   appLaunch: boolean;
 }
 
+export interface HostStatus {
+  platform: string;
+  connectorPlatform: string | null;
+  version: string;
+  connected: boolean;
+  deviceConnected: boolean;
+  capabilities: ConnectorCapabilities;
+  services: {
+    volume: {
+      available: boolean;
+      volume_percent: number | null;
+      muted: boolean | null;
+    };
+    media: {
+      available: boolean;
+      source: string | null;
+      playbackState: string | null;
+    };
+    discord: {
+      available: boolean;
+      running: boolean;
+      state_known: boolean;
+      muted: boolean | null;
+      deafened: boolean | null;
+    };
+    systemStats: {
+      available: boolean;
+      cpu_percent: number | null;
+      memory_percent: number | null;
+      gpu_percent: number | null;
+    };
+    appLaunch: {
+      available: boolean;
+      apps_count: number;
+    };
+    macros: {
+      available: boolean;
+      macros_count: number;
+    };
+  };
+}
+
 export interface DeviceInfo {
   device: string;
   version: string;
@@ -528,6 +570,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     }
 
     appReadyPayload.capabilities = this.getCapabilities();
+    appReadyPayload.hostStatus = this.getHostStatus();
 
     await this.broadcastToDevices("app.ready", appReadyPayload);
 
@@ -653,6 +696,21 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
 
       if (method === "connector.capabilities") {
         return { result: { capabilities: this.getCapabilities() } };
+      }
+
+      if (
+        method === "host.get_status" ||
+        method === "host.status" ||
+        method === "connector.get_status" ||
+        method === "connector.status"
+      ) {
+        const hostStatus = await this.refreshHostStatus();
+        return {
+          result: {
+            status: "ok",
+            hostStatus,
+          },
+        };
       }
 
       if (normalizedMethod === "spotify.auth.get_status") {
@@ -1412,6 +1470,87 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       systemStats: statsSupported,
       macros: macrosSupported,
       appLaunch: appLaunchSupported,
+    };
+  }
+
+  async refreshHostStatus(): Promise<HostStatus> {
+    const promises: Array<Promise<unknown>> = [];
+    if (this.discordService) {
+      promises.push(this.discordService.getStatus().catch(() => null));
+    }
+    if (this.systemStatsService) {
+      promises.push(this.systemStatsService.getStats().catch(() => null));
+    }
+    if (this.appLaunchService) {
+      promises.push(this.appLaunchService.getStatus().catch(() => null));
+    }
+    if (this.macroService) {
+      promises.push(this.macroService.getStatus().catch(() => null));
+    }
+    if (this.systemMediaService) {
+      promises.push(
+        this.systemMediaService.getVolume({ timeoutMs: 2_000 }).catch(() => null),
+      );
+    }
+    await Promise.allSettled(promises);
+    return this.getHostStatus();
+  }
+
+  getHostStatus(): HostStatus {
+    const caps = this.getCapabilities();
+    const discordState = caps.discord ? this.discordService?.status : null;
+    const statsState = caps.systemStats ? this.systemStatsService?.cachedStats : null;
+    const mediaState = caps.media ? this.systemMediaService?.latestState : null;
+    const volumeSupported = caps.volume;
+
+    return {
+      platform: this.platform,
+      connectorPlatform: this.platform === "win32" ? "windows" : null,
+      version: getConnectorVersion(),
+      connected: this.connections.size > 0,
+      deviceConnected: this.connections.size > 0,
+      capabilities: caps,
+      services: {
+        volume: {
+          available: volumeSupported,
+          volume_percent: volumeSupported
+            ? (this.systemMediaService?.currentVolumePercent ?? null)
+            : null,
+          muted: volumeSupported
+            ? (this.systemMediaService?.currentMuted ?? null)
+            : null,
+        },
+        media: {
+          available: caps.media,
+          source: caps.media ? (mediaState?.sourceApp ?? null) : null,
+          playbackState: caps.media ? (mediaState?.playbackState ?? null) : null,
+        },
+        discord: {
+          available: caps.discord,
+          running: caps.discord ? (discordState?.running ?? false) : false,
+          state_known: caps.discord ? (discordState?.state_known ?? false) : false,
+          muted: caps.discord ? (discordState?.muted ?? null) : null,
+          deafened: caps.discord ? (discordState?.deafened ?? null) : null,
+        },
+        systemStats: {
+          available: caps.systemStats,
+          cpu_percent: caps.systemStats ? (statsState?.cpu_percent ?? null) : null,
+          memory_percent: caps.systemStats ? (statsState?.memory_percent ?? null) : null,
+          gpu_percent: caps.systemStats ? (statsState?.gpu_percent ?? null) : null,
+        },
+        appLaunch: {
+          available: caps.appLaunch,
+          apps_count: caps.appLaunch
+            ? (this.appLaunchService?.configuredAppsCount ?? 0)
+            : 0,
+        },
+        macros: {
+          available: caps.macros,
+          macros_count: caps.macros
+            ? (this.macroService?.configuredMacrosCount ?? 0)
+            : 0,
+        },
+      },
     };
   }
 
