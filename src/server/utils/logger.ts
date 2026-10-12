@@ -13,6 +13,20 @@ const logFile =
 const currentLevel: LogLevel =
   (process.env.LOG_LEVEL as LogLevel) || "info";
 
+const recentLogs: string[] = [];
+const MAX_RECENT_LOGS = 50;
+
+function pushRecentLog(line: string): void {
+  if (recentLogs.length >= MAX_RECENT_LOGS) {
+    recentLogs.shift();
+  }
+  recentLogs.push(line);
+}
+
+export function getRecentLogs(): string[] {
+  return [...recentLogs];
+}
+
 function shouldLog(level: LogLevel): boolean {
   return LOG_LEVELS[level] >= LOG_LEVELS[currentLevel];
 }
@@ -80,6 +94,7 @@ export function createLogger(category: string) {
         const line = formatLine("warn", category, msg, args);
         console.warn(`[${timestamp()}] [WARN] [${category}] ${msg}`, ...args);
         writeRotatingLog(line);
+        pushRecentLog(line);
       }
     },
     error(msg: string, ...args: unknown[]) {
@@ -87,6 +102,7 @@ export function createLogger(category: string) {
         const line = formatLine("error", category, msg, args);
         console.error(`[${timestamp()}] [ERROR] [${category}] ${msg}`, ...args);
         writeRotatingLog(line);
+        pushRecentLog(line);
       }
     },
   };

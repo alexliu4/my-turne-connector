@@ -128,13 +128,16 @@ export class FileSystemAppLaunchPreferenceStore implements AppLaunchPreferenceSt
   }
 }
 
-function validateAppDefinition(fallbackKey: string, val: unknown): AppDefinition | null {
+export function validateAppDefinition(fallbackKey: string, val: unknown): AppDefinition | null {
   if (!val || typeof val !== "object" || Array.isArray(val)) return null;
   const rec = val as Record<string, unknown>;
   const id = typeof rec.id === "string" && rec.id.trim() ? rec.id.trim() : fallbackKey.trim();
   const name = typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : id;
   const target = typeof rec.target === "string" && rec.target.trim() ? rec.target.trim() : null;
   if (!id || !name || !target) return null;
+
+  // Enforce identifier format: alphanumerics, hyphens, underscores
+  if (!/^[a-zA-Z0-9_-]+$/.test(id)) return null;
 
   if (rec.enabled !== undefined && typeof rec.enabled !== "boolean") return null;
   const enabled = rec.enabled ?? true;
