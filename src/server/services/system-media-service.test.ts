@@ -144,6 +144,16 @@ describe("SystemMediaService - Audio Output Discovery & Switching", () => {
     expect(host.calls.at(-1)).toEqual({ method: "audio.outputs.list", params: {} });
   });
 
+  test("audio discovery distinguishes enumeration failure from no available devices", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+    host.audioOutputsDevices = [];
+    host.selectedDeviceId = null;
+    expect(await service.getAudioOutputs()).toEqual({ status: "ok", selectedDeviceId: null, devices: [] });
+    host.audioOutputsStatus = "unsupported";
+    expect(await service.getAudioOutputs()).toEqual({ status: "unsupported", devices: [] });
+  });
+
   test("selectAudioOutput successfully changes default output", async () => {
     const host = new FakeHostBridge();
     const service = new SystemMediaService(host, new RecordingSink());
@@ -154,8 +164,27 @@ describe("SystemMediaService - Audio Output Discovery & Switching", () => {
     expect(result.confirmed).toBeTrue();
     expect(host.calls.at(-1)).toEqual({
       method: "audio.outputs.select",
-      params: { deviceId: "device-2" },
+      params: { deviceId: "device-2", roles: ["console", "multimedia"] },
     });
+  });
+
+  test("invalid explicit roles never switch the native output", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+    for (const roles of [[], null, "all", 1, false, {}, [null], [undefined], new Array(1), [1], ["console", false], ["unknown"], [""]]) {
+      expect(await service.selectAudioOutput("device-2", roles)).toEqual({ status: "invalid_role" });
+    }
+    expect(host.calls).toEqual([]);
+    expect(host.selectedDeviceId).toBe("device-1");
+  });
+
+  test("valid explicit roles are forwarded", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+    for (const roles of [["console"], ["multimedia"], ["communications"], ["all"], ["CONSOLE", "communications"]]) {
+      expect((await service.selectAudioOutput("device-2", roles)).status).toBe("ok");
+      expect(host.calls.at(-1)?.params).toEqual({ deviceId: "device-2", roles });
+    }
   });
 
   test("selectAudioOutput handles device missing failure", async () => {

@@ -29,6 +29,7 @@ import { MAX_OTA_TRANSFER_WINDOW_BYTES } from "./services/ota-transfer";
 import type { HostBridgeClient } from "./platform/host-bridge";
 import {
   SystemMediaService,
+  parseAudioOutputRoles,
   type SystemMediaPreferenceStore,
 } from "./services/system-media-service";
 import { DiscordService } from "./services/discord-service";
@@ -770,7 +771,8 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         if (typeof deviceId !== "string" || !deviceId) {
           return { result: { status: "invalid_device" } };
         }
-        const roles = Array.isArray(p.roles) ? p.roles : (typeof p.role === "string" ? [p.role] : undefined);
+        const roles = parseAudioOutputRoles(p);
+        if (!roles) return { result: { status: "invalid_role" } };
         const res = await this.systemMediaService.selectAudioOutput(deviceId, roles);
         return { result: res };
       }

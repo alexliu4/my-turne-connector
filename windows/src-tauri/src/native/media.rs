@@ -1216,7 +1216,7 @@ fn get_audio_outputs() -> Value {
 
         let count = match collection.GetCount() {
             Ok(c) => c,
-            Err(_) => return json!({ "status": "ok", "devices": [] }),
+            Err(_) => return json!({ "status": "unsupported", "devices": [] }),
         };
 
         let default_console_id = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
@@ -1291,7 +1291,22 @@ fn get_device_friendly_name(device: &IMMDevice) -> Option<String> {
 
 fn parse_roles(params: &Value) -> Result<Vec<ERole>, String> {
     let mut roles = Vec::new();
-    if let Some(r) = params.get("roles").and_then(Value::as_array) {
+    // Validate the singular field even when the plural field takes precedence.
+    if let Some(v) = params.get("role") {
+        let s = v
+            .as_str()
+            .ok_or_else(|| "Role parameter must be a string".to_string())?;
+        if !matches!(
+            s.to_ascii_lowercase().as_str(),
+            "console" | "multimedia" | "communications" | "all"
+        ) {
+            return Err(format!("Invalid role requested: {s}"));
+        }
+    }
+    if let Some(v) = params.get("roles") {
+        let r = v
+            .as_array()
+            .ok_or_else(|| "Roles parameter must be an array".to_string())?;
         if r.is_empty() {
             return Err("Explicit roles list cannot be empty".to_string());
         }
@@ -1592,6 +1607,50 @@ mod tests {
         assert_ne!(
             now_playing_core_signature(&first),
             now_playing_core_signature(&second)
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_explicit_roles_are_rejected_before_native_switching() {
+        let state = WindowsMediaState::new();
+        let bridge = BridgeServer::new("token".to_string());
+        for mut params in [
+            json!({ "roles": [] }),
+            json!({ "roles": null }),
+            json!({ "roles": "all" }),
+            json!({ "roles": 1 }),
+            json!({ "roles": false }),
+            json!({ "roles": {} }),
+            json!({ "roles": [null] }),
+            json!({ "roles": [1] }),
+            json!({ "roles": ["console", false] }),
+            json!({ "roles": ["unknown"] }),
+            json!({ "role": null }),
+            json!({ "role": [] }),
+            json!({ "role": {} }),
+            json!({ "role": 1 }),
+            json!({ "role": false }),
+            json!({ "role": "unknown" }),
+            json!({ "roles": ["console"], "role": null }),
+            json!({ "roles": null, "role": "all" }),
+        ] {
+            assert!(parse_roles(&params).is_err(), "accepted {params}");
+            params["deviceId"] = json!("invalid-role-test-device");
+            for method in ["audio.outputs.select", "media.set_audio_output"] {
+                // Only validation returns invalid_role; switching would attempt COM discovery.
+                assert_eq!(
+                    state.dispatch(&bridge, method, params.clone()).await.unwrap(),
+                    json!({ "status": "invalid_role" })
+                );
+            }
+        }
+        assert_eq!(
+            parse_roles(&json!({ "roles": ["CONSOLE", "multimedia"] })).unwrap(),
+            vec![eConsole, eMultimedia]
+        );
+        assert_eq!(
+            parse_roles(&json!({ "roles": ["console"], "role": "all" })).unwrap(),
+            vec![eConsole]
         );
     }
 

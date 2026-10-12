@@ -65,6 +65,19 @@ export interface SelectAudioOutputResponse {
   confirmed?: boolean;
 }
 
+// Validate both explicit fields before choosing the plural field's precedence.
+export function parseAudioOutputRoles(params: Record<string, unknown>): string[] | null {
+  const validRole = (value: unknown): value is string =>
+    typeof value === "string" && ["console", "multimedia", "communications", "all"].includes(value.toLowerCase());
+  if ("roles" in params && (!Array.isArray(params.roles) || params.roles.length === 0 || !Array.from(params.roles).every(validRole))) {
+    return null;
+  }
+  if ("role" in params && !validRole(params.role)) return null;
+  return "roles" in params ? params.roles as string[]
+    : "role" in params ? [params.role as string]
+    : ["console", "multimedia"];
+}
+
 export interface SystemMediaSink {
   sendEvent(topic: string, data: unknown): Promise<void>;
   sendVolume(volumePercent: number, muted?: boolean): Promise<void>;
@@ -364,15 +377,14 @@ export class SystemMediaService {
     }
   }
 
-  async selectAudioOutput(deviceId: string, roles?: string[], options?: { timeoutMs?: number }): Promise<SelectAudioOutputResponse> {
+  async selectAudioOutput(deviceId: string, roles?: unknown, options?: { timeoutMs?: number }): Promise<SelectAudioOutputResponse> {
     if (typeof deviceId !== "string" || deviceId.trim().length === 0) {
       return { status: "invalid_device" };
     }
+    const validatedRoles = parseAudioOutputRoles(roles === undefined ? {} : { roles });
+    if (!validatedRoles) return { status: "invalid_role" };
     try {
-      const params: Record<string, unknown> = { deviceId: deviceId.trim() };
-      if (Array.isArray(roles) && roles.length > 0) {
-        params.roles = roles;
-      }
+      const params: Record<string, unknown> = { deviceId: deviceId.trim(), roles: validatedRoles };
       const callOptions = { timeoutMs: options?.timeoutMs ?? 3000 };
       const response = await this.hostBridge.call<unknown>("audio.outputs.select", params, callOptions);
       const rec = asRecord(response);
