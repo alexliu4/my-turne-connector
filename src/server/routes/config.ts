@@ -10,31 +10,18 @@ import {
   validateMacroDefinition,
 } from "../services/macro-config";
 import { createLogger } from "../utils/logger";
+import { isLocalhostRequest } from "../utils/request-security";
 
 const log = createLogger("ConfigRoutes");
-
-function isLocalhostRequest(request: Request): boolean {
-  try {
-    const url = new URL(request.url);
-    const host = url.hostname;
-    return (
-      host === "localhost" ||
-      host === "127.0.0.1" ||
-      host === "::1" ||
-      host === "[::1]"
-    );
-  } catch {
-    return false;
-  }
-}
 
 export function createConfigRoutes(
   appStore: AppLaunchPreferenceStore = new FileSystemAppLaunchPreferenceStore(),
   macroStore: MacroPreferenceStore = new FileSystemMacroPreferenceStore(),
+  platform: NodeJS.Platform = process.platform,
 ) {
   return new Elysia({ prefix: "/api/config" })
     .onBeforeHandle(({ request, set }) => {
-      if (!isLocalhostRequest(request)) {
+      if (!isLocalhostRequest(request, platform)) {
         log.warn(`Rejecting non-localhost config request from ${request.headers.get("host") || "unknown"}`);
         set.status = 403;
         return { error: "Configuration API is localhost-only" };

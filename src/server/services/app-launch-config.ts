@@ -131,13 +131,14 @@ export class FileSystemAppLaunchPreferenceStore implements AppLaunchPreferenceSt
 export function validateAppDefinition(fallbackKey: string, val: unknown): AppDefinition | null {
   if (!val || typeof val !== "object" || Array.isArray(val)) return null;
   const rec = val as Record<string, unknown>;
-  const id = typeof rec.id === "string" && rec.id.trim() ? rec.id.trim() : fallbackKey.trim();
-  const name = typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : id;
+  const rawId = typeof rec.id === "string" && rec.id.trim() ? rec.id.trim() : fallbackKey.trim();
+  const name = typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : rawId;
   const target = typeof rec.target === "string" && rec.target.trim() ? rec.target.trim() : null;
-  if (!id || !name || !target) return null;
 
-  // Enforce identifier format: alphanumerics, hyphens, underscores
-  if (!/^[a-zA-Z0-9_-]+$/.test(id)) return null;
+  if (!rawId || !name || !target) return null;
+
+  // Preserve existing configuration IDs while preventing control character injection
+  if (/[\x00-\x1F\x7F]/.test(rawId)) return null;
 
   if (rec.enabled !== undefined && typeof rec.enabled !== "boolean") return null;
   const enabled = rec.enabled ?? true;
@@ -146,7 +147,7 @@ export function validateAppDefinition(fallbackKey: string, val: unknown): AppDef
     ? rec.fallbacks.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
     : undefined;
 
-  return { id, name, target, fallbacks, enabled };
+  return { id: rawId, name, target, fallbacks, enabled };
 }
 
 function errorMessage(error: unknown): string {

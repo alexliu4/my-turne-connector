@@ -1,11 +1,22 @@
 import { Elysia } from "elysia";
 import { DiagnosticsService } from "../services/diagnostics-service";
 import { createLogger } from "../utils/logger";
+import { isLocalhostRequest } from "../utils/request-security";
 
 const log = createLogger("DiagnosticsRoutes");
 
-export function createDiagnosticsRoutes(diagnosticsService: DiagnosticsService) {
+export function createDiagnosticsRoutes(
+  diagnosticsService: DiagnosticsService,
+  platform: NodeJS.Platform = process.platform,
+) {
   return new Elysia({ prefix: "/api/diagnostics" })
+    .onBeforeHandle(({ request, set }) => {
+      if (!isLocalhostRequest(request, platform)) {
+        log.warn(`Rejecting non-localhost diagnostics request from ${request.headers.get("host") || "unknown"}`);
+        set.status = 403;
+        return { error: "Diagnostics API is localhost-only" };
+      }
+    })
     .get("/status", async () => {
       const report = await diagnosticsService.getDiagnostics();
       return { status: "ok", diagnostics: report };

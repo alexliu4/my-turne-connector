@@ -8,9 +8,16 @@ export interface DiagnosticsReport {
   platform: string;
   connectorPlatform: string | null;
   sidecarReadiness: boolean;
-  hostBridgeConnected: boolean;
+  hostBridgeConnected: boolean | null;
   carThingConnected: boolean;
-  carThingDevices: Array<{ id: string; deviceInfo: any }>;
+  carThingDeviceCount: number;
+  carThingDevices: Array<{
+    id: string;
+    deviceInfo: {
+      device: string;
+      version: string;
+    } | null;
+  }>;
   hostStatus: HostStatus | null;
   recentLogs: string[];
 }
@@ -21,20 +28,35 @@ export class DiagnosticsService {
   async getDiagnostics(): Promise<DiagnosticsReport> {
     const hostStatus = await this.manager.refreshHostStatus();
     const connStatus = this.manager.getConnectionStatus();
-    const recentLogs = getRecentLogs();
 
-    return {
+    const carThingDevices = connStatus.devices.map((d) => ({
+      id: d.id,
+      deviceInfo: d.deviceInfo
+        ? {
+            device: d.deviceInfo.device ?? "Nocturne Car Thing",
+            version: d.deviceInfo.version ?? "",
+          }
+        : null,
+    }));
+
+    const rawLogs = getRecentLogs();
+    const redactedLogs = rawLogs.map((line) => redactSensitiveText(line));
+
+    const report: DiagnosticsReport = {
       timestamp: new Date().toISOString(),
       version: getConnectorVersion(),
       platform: process.platform,
       connectorPlatform: process.platform === "win32" ? "windows" : null,
       sidecarReadiness: true,
-      hostBridgeConnected: process.platform === "win32" ? hostStatus.connected : true,
+      hostBridgeConnected: this.manager.isHostBridgeConnected(),
       carThingConnected: connStatus.connected,
-      carThingDevices: connStatus.devices,
+      carThingDeviceCount: connStatus.deviceCount,
+      carThingDevices,
       hostStatus,
-      recentLogs,
+      recentLogs: redactedLogs,
     };
+
+    return redactValue(report) as DiagnosticsReport;
   }
 
   async getRedactedExport(): Promise<Record<string, unknown>> {
@@ -47,15 +69,23 @@ export function redactSensitiveText(text: string): string {
   if (!text) return text;
   let redacted = text;
 
-  // Redact Windows user paths e.g., C:\Users\Username\... -> C:\Users\[REDACTED]\...
-  redacted = redacted.replace(/([a-zA-Z]:\\Users\\)[^\\]+/gi, "$1[REDACTED]");
+  // Redact Windows user paths e.g., C:\Users\Username\... -> C:\Users\[REDACTED]\... or C:/Users/Username/...
+  redacted = redacted.replace(/([a-zA-Z]:[/\\]Users[/\\])[^/\\\s"']+/gi, "$1[REDACTED]");
 
   // Redact POSIX user paths e.g., /home/username/... -> /home/[REDACTED]/... or /Users/username/... -> /Users/[REDACTED]/...
-  redacted = redacted.replace(/(\/(?:home|Users)\/)[^/]+/g, "$1[REDACTED]");
+  redacted = redacted.replace(/(\/(?:home|Users)\/)[^/\s"']+/g, "$1[REDACTED]");
 
-  // Redact Bearer / auth tokens
+  // Redact Bearer & auth tokens
   redacted = redacted.replace(/(Bearer\s+)[A-Za-z0-9\-._~+/]+=*/gi, "$1[REDACTED]");
-  redacted = redacted.replace(/(token|secret|password|key)=([^\s&"']+)/gi, "$1=[REDACTED]");
+
+  // Redact key=value query string params and assignments
+  redacted = redacted.replace(
+    /(?<=\b(?:token|secret|password|credential|auth|code|api_key|access_token|refresh_token)=)[^\s&"']+/gi,
+    "[REDACTED]",
+  );
+
+  // Redact user credentials in URLs e.g. http://user:pass@host
+  redacted = redacted.replace(/(https?:\/\/)([^:\s\/]+):([^@\s\/]+)@/gi, "$1[REDACTED]:[REDACTED]@");
 
   return redacted;
 }
@@ -78,7 +108,14 @@ export function redactValue(val: unknown): unknown {
         lowerKey.includes("secret") ||
         lowerKey.includes("password") ||
         lowerKey.includes("credential") ||
-        lowerKey.includes("key")
+        lowerKey.includes("auth") ||
+        lowerKey.includes("session") ||
+        lowerKey.includes("cookie") ||
+        lowerKey.includes("key") ||
+        lowerKey.includes("serial") ||
+        lowerKey.includes("email") ||
+        lowerKey.includes("user_id") ||
+        lowerKey.includes("userid")
       ) {
         result[k] = "[REDACTED]";
       } else {

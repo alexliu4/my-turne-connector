@@ -1,12 +1,14 @@
 import { describe, expect, it, beforeEach } from "bun:test";
 import { createConfigRoutes } from "./config";
-import type {
-  AppLaunchConfig,
-  AppLaunchPreferenceStore,
+import {
+  type AppLaunchConfig,
+  type AppLaunchPreferenceStore,
+  validateAppDefinition,
 } from "../services/app-launch-config";
-import type {
-  MacroConfig,
-  MacroPreferenceStore,
+import {
+  type MacroConfig,
+  type MacroPreferenceStore,
+  validateMacroDefinition,
 } from "../services/macro-config";
 
 class MemoryAppStore implements AppLaunchPreferenceStore {
@@ -29,7 +31,7 @@ class MemoryMacroStore implements MacroPreferenceStore {
   }
 }
 
-describe("Config REST Routes", () => {
+describe("Config REST Routes & Security", () => {
   let appStore: MemoryAppStore;
   let macroStore: MemoryMacroStore;
   let app: ReturnType<typeof createConfigRoutes>;
@@ -55,7 +57,8 @@ describe("Config REST Routes", () => {
         },
       },
     });
-    app = createConfigRoutes(appStore, macroStore);
+    // Pass platform "win32" for testing Windows local route behavior
+    app = createConfigRoutes(appStore, macroStore, "win32");
   });
 
   it("lists apps and macros for localhost requests", async () => {
@@ -78,15 +81,81 @@ describe("Config REST Routes", () => {
     expect(jsonMacros.macros[0].id).toBe("open_vscode");
   });
 
-  it("rejects non-localhost requests with 403", async () => {
+  it("rejects requests on non-Windows platforms", async () => {
+    const linuxApp = createConfigRoutes(appStore, macroStore, "linux");
+    const res = await linuxApp.handle(
+      new Request("http://localhost/api/config/apps"),
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it("rejects DNS rebinding attacks via malicious Host headers", async () => {
     const res = await app.handle(
-      new Request("http://192.168.1.100/api/config/apps", {
-        headers: { host: "192.168.1.100" },
+      new Request("http://127.0.0.1/api/config/apps", {
+        headers: { host: "attacker-domain.com" },
       }),
     );
     expect(res.status).toBe(403);
-    const json = await res.json();
-    expect(json.error).toBe("Configuration API is localhost-only");
+  });
+
+  it("rejects cross-site CSRF requests with non-loopback Origin or Sec-Fetch-Site", async () => {
+    const resCrossSite = await app.handle(
+      new Request("http://localhost/api/config/apps", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "sec-fetch-site": "cross-site",
+        },
+        body: JSON.stringify({
+          id: "malicious_app",
+          name: "Malicious App",
+          target: "calc.exe",
+        }),
+      }),
+    );
+    expect(resCrossSite.status).toBe(403);
+
+    const resEvilOrigin = await app.handle(
+      new Request("http://localhost/api/config/apps", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://evil-website.com",
+        },
+        body: JSON.stringify({
+          id: "malicious_app",
+          name: "Malicious App",
+          target: "calc.exe",
+        }),
+      }),
+    );
+    expect(resEvilOrigin.status).toBe(403);
+  });
+
+  it("preserves custom existing config IDs without silently dropping them", () => {
+    const appWithDots = validateAppDefinition("app.vscode", {
+      id: "app.vscode",
+      name: "VS Code Plugin",
+      target: "vscode://",
+    });
+    expect(appWithDots).not.toBeNull();
+    expect(appWithDots?.id).toBe("app.vscode");
+
+    const appWithSpaces = validateAppDefinition("My Custom App", {
+      id: "My Custom App",
+      name: "Custom App",
+      target: "custom.exe",
+    });
+    expect(appWithSpaces).not.toBeNull();
+    expect(appWithSpaces?.id).toBe("My Custom App");
+
+    const macroWithVersion = validateMacroDefinition("macro-v1.2", {
+      id: "macro-v1.2",
+      name: "Macro 1.2",
+      action: { type: "media", control: "play" },
+    });
+    expect(macroWithVersion).not.toBeNull();
+    expect(macroWithVersion?.id).toBe("macro-v1.2");
   });
 
   it("adds and updates an application definition", async () => {

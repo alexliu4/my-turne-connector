@@ -62,6 +62,7 @@ export interface HostStatus {
   version: string;
   connected: boolean;
   deviceConnected: boolean;
+  hostBridgeConnected: boolean | null;
   capabilities: ConnectorCapabilities;
   services: {
     volume: {
@@ -1500,6 +1501,19 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     };
   }
 
+  isHostBridgeConnected(): boolean | null {
+    if (this.platform !== "win32") return null;
+    const caps = this.getCapabilities();
+    return (
+      caps.volume ||
+      caps.media ||
+      caps.discord ||
+      caps.systemStats ||
+      caps.appLaunch ||
+      caps.macros
+    );
+  }
+
   async refreshHostStatus(): Promise<HostStatus> {
     const promises: Array<Promise<unknown>> = [];
     if (this.discordService) {
@@ -1536,6 +1550,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       version: getConnectorVersion(),
       connected: this.connections.size > 0,
       deviceConnected: this.connections.size > 0,
+      hostBridgeConnected: this.isHostBridgeConnected(),
       capabilities: caps,
       services: {
         volume: {
