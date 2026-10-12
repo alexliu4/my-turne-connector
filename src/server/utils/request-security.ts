@@ -13,20 +13,30 @@ export function isLocalhostRequest(
 
   try {
     // 1. Host header check to prevent DNS rebinding attacks
-    const hostHeader = request.headers.get("host")?.trim().toLowerCase();
+    const hostHeader = request.headers.get("host")?.trim();
     if (hostHeader) {
-      const hostName = hostHeader.split(":")[0]?.replace(/^\[|\]$/g, "") ?? "";
-      if (hostName !== "localhost" && hostName !== "127.0.0.1" && hostName !== "::1") {
-        log.warn(`Rejecting request with non-loopback Host header: ${hostHeader}`);
+      try {
+        const hostUrl = new URL(`http://${hostHeader}`);
+        const hostname = hostUrl.hostname.toLowerCase();
+        if (hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "::1") {
+          log.warn(`Rejecting request with non-loopback Host header: ${hostHeader}`);
+          return false;
+        }
+      } catch {
+        log.warn(`Rejecting request with malformed Host header: ${hostHeader}`);
         return false;
       }
     }
 
     // 2. Requested URL Host check
-    const url = new URL(request.url);
-    const hostname = url.hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    if (hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "::1") {
-      log.warn(`Rejecting request with non-loopback URL hostname: ${hostname}`);
+    const requestUrl = new URL(request.url);
+    const requestHostname = requestUrl.hostname.toLowerCase();
+    if (
+      requestHostname !== "localhost" &&
+      requestHostname !== "127.0.0.1" &&
+      requestHostname !== "::1"
+    ) {
+      log.warn(`Rejecting request with non-loopback URL hostname: ${requestHostname}`);
       return false;
     }
 
@@ -37,32 +47,54 @@ export function isLocalhostRequest(
       return false;
     }
 
-    // 4. Origin header check (for CSRF protection)
-    const origin = request.headers.get("origin")?.trim().toLowerCase();
+    // 4. Strict Origin header check using exact URL hostname matching if present
+    const origin = request.headers.get("origin")?.trim();
     if (origin) {
-      const isLoopbackOrigin =
-        origin.startsWith("http://localhost") ||
-        origin.startsWith("http://127.0.0.1") ||
-        origin.startsWith("http://[::1]") ||
-        origin.startsWith("app://localhost") ||
-        origin.startsWith("tauri://localhost");
-      if (!isLoopbackOrigin) {
-        log.warn(`Rejecting request with non-loopback Origin: ${origin}`);
+      try {
+        const originUrl = new URL(origin);
+        const isAllowedScheme =
+          originUrl.protocol === "http:" ||
+          originUrl.protocol === "app:" ||
+          originUrl.protocol === "tauri:" ||
+          originUrl.protocol === "https:";
+        const originHostname = originUrl.hostname.toLowerCase();
+        const isLoopbackOrigin =
+          originHostname === "localhost" ||
+          originHostname === "127.0.0.1" ||
+          originHostname === "::1";
+
+        if (!isAllowedScheme || !isLoopbackOrigin) {
+          log.warn(`Rejecting request with untrusted Origin: ${origin}`);
+          return false;
+        }
+      } catch {
+        log.warn(`Rejecting request with malformed Origin header: ${origin}`);
         return false;
       }
     }
 
-    // 5. Referer header check
-    const referer = request.headers.get("referer")?.trim().toLowerCase();
+    // 5. Strict Referer header check using exact URL hostname matching if present
+    const referer = request.headers.get("referer")?.trim();
     if (referer) {
-      const isLoopbackReferer =
-        referer.startsWith("http://localhost") ||
-        referer.startsWith("http://127.0.0.1") ||
-        referer.startsWith("http://[::1]") ||
-        referer.startsWith("app://localhost") ||
-        referer.startsWith("tauri://localhost");
-      if (!isLoopbackReferer) {
-        log.warn(`Rejecting request with non-loopback Referer: ${referer}`);
+      try {
+        const refererUrl = new URL(referer);
+        const isAllowedScheme =
+          refererUrl.protocol === "http:" ||
+          refererUrl.protocol === "app:" ||
+          refererUrl.protocol === "tauri:" ||
+          refererUrl.protocol === "https:";
+        const refererHostname = refererUrl.hostname.toLowerCase();
+        const isLoopbackReferer =
+          refererHostname === "localhost" ||
+          refererHostname === "127.0.0.1" ||
+          refererHostname === "::1";
+
+        if (!isAllowedScheme || !isLoopbackReferer) {
+          log.warn(`Rejecting request with untrusted Referer: ${referer}`);
+          return false;
+        }
+      } catch {
+        log.warn(`Rejecting request with malformed Referer header: ${referer}`);
         return false;
       }
     }

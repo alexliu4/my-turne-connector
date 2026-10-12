@@ -143,6 +143,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
   readonly carThingOtaService: CarThingOTAService;
   readonly bluetoothService: BluetoothService;
   readonly setupStateService = new SetupStateService();
+  readonly hostBridge: HostBridgeClient | null;
   readonly systemMediaService: SystemMediaService | null;
   readonly discordService: DiscordService | null;
   readonly systemStatsService: SystemStatsService | null;
@@ -168,6 +169,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
 
   constructor(dependencies: NocturneManagerDependencies = {}) {
     this.platform = dependencies.platform ?? process.platform;
+    this.hostBridge = dependencies.hostBridge ?? null;
     this.bluetoothService = dependencies.bluetoothService ?? new BluetoothService();
     this.carThingOtaService =
       dependencies.carThingOtaService ?? new CarThingOTAService();
@@ -1503,15 +1505,11 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
 
   isHostBridgeConnected(): boolean | null {
     if (this.platform !== "win32") return null;
-    const caps = this.getCapabilities();
-    return (
-      caps.volume ||
-      caps.media ||
-      caps.discord ||
-      caps.systemStats ||
-      caps.appLaunch ||
-      caps.macros
-    );
+    if (!this.hostBridge) return false;
+    if (typeof this.hostBridge.isConnected === "function") {
+      return this.hostBridge.isConnected();
+    }
+    return true;
   }
 
   async refreshHostStatus(): Promise<HostStatus> {

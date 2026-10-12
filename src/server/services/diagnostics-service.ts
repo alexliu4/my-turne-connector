@@ -12,11 +12,9 @@ export interface DiagnosticsReport {
   carThingConnected: boolean;
   carThingDeviceCount: number;
   carThingDevices: Array<{
-    id: string;
-    deviceInfo: {
-      device: string;
-      version: string;
-    } | null;
+    deviceIndex: number;
+    deviceType: string;
+    firmwareVersion: string;
   }>;
   hostStatus: HostStatus | null;
   recentLogs: string[];
@@ -29,14 +27,10 @@ export class DiagnosticsService {
     const hostStatus = await this.manager.refreshHostStatus();
     const connStatus = this.manager.getConnectionStatus();
 
-    const carThingDevices = connStatus.devices.map((d) => ({
-      id: d.id,
-      deviceInfo: d.deviceInfo
-        ? {
-            device: d.deviceInfo.device ?? "Nocturne Car Thing",
-            version: d.deviceInfo.version ?? "",
-          }
-        : null,
+    const carThingDevices = connStatus.devices.map((d, index) => ({
+      deviceIndex: index + 1,
+      deviceType: d.deviceInfo?.device ?? "Nocturne Car Thing",
+      firmwareVersion: d.deviceInfo?.version ?? "unknown",
     }));
 
     const rawLogs = getRecentLogs();
@@ -47,7 +41,7 @@ export class DiagnosticsService {
       version: getConnectorVersion(),
       platform: process.platform,
       connectorPlatform: process.platform === "win32" ? "windows" : null,
-      sidecarReadiness: true,
+      sidecarReadiness: true, // Bun sidecar process is online and serving requests
       hostBridgeConnected: this.manager.isHostBridgeConnected(),
       carThingConnected: connStatus.connected,
       carThingDeviceCount: connStatus.deviceCount,
@@ -69,16 +63,17 @@ export function redactSensitiveText(text: string): string {
   if (!text) return text;
   let redacted = text;
 
-  // Redact Windows user paths e.g., C:\Users\Username\... -> C:\Users\[REDACTED]\... or C:/Users/Username/...
+  // Redact Windows user paths e.g., C:\Users\Username\... or C:/Users/Username/...
   redacted = redacted.replace(/([a-zA-Z]:[/\\]Users[/\\])[^/\\\s"']+/gi, "$1[REDACTED]");
 
-  // Redact POSIX user paths e.g., /home/username/... -> /home/[REDACTED]/... or /Users/username/... -> /Users/[REDACTED]/...
+  // Redact POSIX user paths e.g., /home/username/... or /Users/username/...
   redacted = redacted.replace(/(\/(?:home|Users)\/)[^/\s"']+/g, "$1[REDACTED]");
 
-  // Redact Bearer & auth tokens
+  // Redact Bearer and Basic auth headers
   redacted = redacted.replace(/(Bearer\s+)[A-Za-z0-9\-._~+/]+=*/gi, "$1[REDACTED]");
+  redacted = redacted.replace(/(Basic\s+)[A-Za-z0-9+/]+=*/gi, "$1[REDACTED]");
 
-  // Redact key=value query string params and assignments
+  // Redact query parameter assignments e.g. token=123, secret=abc, code=xyz, password=def
   redacted = redacted.replace(
     /(?<=\b(?:token|secret|password|credential|auth|code|api_key|access_token|refresh_token)=)[^\s&"']+/gi,
     "[REDACTED]",

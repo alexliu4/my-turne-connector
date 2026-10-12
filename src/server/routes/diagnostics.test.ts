@@ -19,7 +19,7 @@ class MockDiagnosticsService implements Partial<DiagnosticsService> {
       hostBridgeConnected: this.hostConnected,
       carThingConnected: this.deviceConnected,
       carThingDeviceCount: this.deviceConnected ? 1 : 0,
-      carThingDevices: this.deviceConnected ? [{ id: "rfcomm-server:1", deviceInfo: { device: "Nocturne Car Thing", version: "1.0.0" } }] : [],
+      carThingDevices: this.deviceConnected ? [{ deviceIndex: 1, deviceType: "Nocturne Car Thing", firmwareVersion: "1.0.0" }] : [],
       hostStatus: null,
       recentLogs: [redactSensitiveText("[INFO] Loaded C:\\Users\\alexl\\config.json with token=secret123")],
     };

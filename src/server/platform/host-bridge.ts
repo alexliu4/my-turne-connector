@@ -27,6 +27,7 @@ export interface HostBridgeClient {
   onEvent<T = unknown>(topic: string, listener: (data: T) => void): () => void;
   resetConnection?(): void;
   close(): void;
+  isConnected?(): boolean;
 }
 
 interface PendingRequest {
@@ -63,6 +64,15 @@ export class HostBridge implements HostBridgeClient {
   ) {
     if (!pipePath) throw new Error("Host bridge pipe path is required");
     if (!token) throw new Error("Host bridge token is required");
+  }
+
+  isConnected(): boolean {
+    return Boolean(
+      !this.closed &&
+      this.socket &&
+      !this.socket.destroyed &&
+      this.socket.readyState === "open"
+    );
   }
 
   async call<TResult = unknown>(
