@@ -31,6 +31,24 @@ class FakeHostBridge implements HostBridgeClient {
   private readonly listeners = new Map<string, Set<(data: unknown) => void>>();
   volumePercent: number | null = null;
   controlStatus: "ok" | "unsupported" | "disabled" = "ok";
+  audioOutputsStatus = "ok";
+  audioOutputsDevices = [
+    {
+      id: "device-1",
+      name: "Speakers",
+      state: "active",
+      isDefault: true,
+      defaultRoles: { console: true, multimedia: true, communications: false },
+    },
+    {
+      id: "device-2",
+      name: "Headphones",
+      state: "active",
+      isDefault: false,
+      defaultRoles: { console: false, multimedia: false, communications: true },
+    },
+  ];
+  selectedDeviceId: string | null = "device-1";
 
   async call<TResult = unknown>(
     method: string,
@@ -42,6 +60,22 @@ class FakeHostBridge implements HostBridgeClient {
       response = { volume_percent: this.volumePercent };
     } else if (method === "media.control") {
       response = { status: this.controlStatus };
+    } else if (method === "audio.outputs.list") {
+      response = {
+        status: this.audioOutputsStatus,
+        selectedDeviceId: this.selectedDeviceId,
+        devices: this.audioOutputsDevices,
+      };
+    } else if (method === "audio.outputs.select") {
+      const p = params as { deviceId?: string };
+      if (!p.deviceId || p.deviceId === "missing") {
+        response = { status: "device_missing" };
+      } else if (p.deviceId === "denied") {
+        response = { status: "access_denied" };
+      } else {
+        this.selectedDeviceId = p.deviceId;
+        response = { status: "ok", deviceId: p.deviceId, confirmed: true };
+      }
     }
     return response as TResult;
   }
@@ -90,6 +124,102 @@ class MemoryPreferenceStore implements SystemMediaPreferenceStore {
     this.saved.push(enabled);
   }
 }
+
+describe("SystemMediaService - Audio Output Discovery & Switching", () => {
+  test("getAudioOutputs enumerates available devices and current default", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.getAudioOutputs();
+    expect(result.status).toBe("ok");
+    expect(result.selectedDeviceId).toBe("device-1");
+    expect(result.devices).toHaveLength(2);
+    expect(result.devices[0]).toEqual({
+      id: "device-1",
+      name: "Speakers",
+      state: "active",
+      isDefault: true,
+      defaultRoles: { console: true, multimedia: true, communications: false },
+    });
+    expect(host.calls.at(-1)).toEqual({ method: "audio.outputs.list", params: {} });
+  });
+
+  test("audio discovery distinguishes enumeration failure from no available devices", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+    host.audioOutputsDevices = [];
+    host.selectedDeviceId = null;
+    expect(await service.getAudioOutputs()).toEqual({ status: "ok", selectedDeviceId: null, devices: [] });
+    host.audioOutputsStatus = "unsupported";
+    expect(await service.getAudioOutputs()).toEqual({ status: "unsupported", devices: [] });
+  });
+
+  test("selectAudioOutput successfully changes default output", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.selectAudioOutput("device-2");
+    expect(result.status).toBe("ok");
+    expect(result.deviceId).toBe("device-2");
+    expect(result.confirmed).toBeTrue();
+    expect(host.calls.at(-1)).toEqual({
+      method: "audio.outputs.select",
+      params: { deviceId: "device-2", roles: ["console", "multimedia"] },
+    });
+  });
+
+  test("invalid explicit roles never switch the native output", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+    for (const roles of [[], null, "all", 1, false, {}, [null], [undefined], new Array(1), [1], ["console", false], ["unknown"], [""]]) {
+      expect(await service.selectAudioOutput("device-2", roles)).toEqual({ status: "invalid_role" });
+    }
+    expect(host.calls).toEqual([]);
+    expect(host.selectedDeviceId).toBe("device-1");
+  });
+
+  test("valid explicit roles are forwarded", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+    for (const roles of [["console"], ["multimedia"], ["communications"], ["all"], ["CONSOLE", "communications"]]) {
+      expect((await service.selectAudioOutput("device-2", roles)).status).toBe("ok");
+      expect(host.calls.at(-1)?.params).toEqual({ deviceId: "device-2", roles });
+    }
+  });
+
+  test("selectAudioOutput handles device missing failure", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.selectAudioOutput("missing");
+    expect(result.status).toBe("device_missing");
+  });
+
+  test("selectAudioOutput rejects empty deviceId with invalid_device", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.selectAudioOutput("   ");
+    expect(result.status).toBe("invalid_device");
+  });
+
+  test("selectAudioOutput handles host bridge errors gracefully", async () => {
+    class FailingBridge extends FakeHostBridge {
+      async call<TResult = unknown>(method: string, params: unknown = {}): Promise<TResult> {
+        if (method === "audio.outputs.select") {
+          throw new Error("Bridge connection lost");
+        }
+        return super.call(method, params);
+      }
+    }
+
+    const host = new FailingBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.selectAudioOutput("device-1");
+    expect(result.status).toBe("unsupported");
+  });
+});
 
 describe("SystemMediaService", () => {
   test("a late successful initial probe cannot overwrite a newer volume update", async () => {

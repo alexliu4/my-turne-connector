@@ -29,6 +29,7 @@ import { MAX_OTA_TRANSFER_WINDOW_BYTES } from "./services/ota-transfer";
 import type { HostBridgeClient } from "./platform/host-bridge";
 import {
   SystemMediaService,
+  parseAudioOutputRoles,
   type SystemMediaPreferenceStore,
 } from "./services/system-media-service";
 import { DiscordService } from "./services/discord-service";
@@ -748,6 +749,32 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         const res = await this.systemMediaService.setVolume(val);
         if (res) return { result: res };
         return { result: { status: "unsupported" } };
+      }
+
+      if (
+        method === "audio.outputs.list" ||
+        method === "media.get_audio_outputs" ||
+        method === "audio.get_outputs"
+      ) {
+        if (!this.systemMediaService) return { result: { status: "unsupported", devices: [] } };
+        const res = await this.systemMediaService.getAudioOutputs();
+        return { result: res };
+      }
+
+      if (
+        method === "audio.outputs.select" ||
+        method === "media.set_audio_output" ||
+        method === "audio.select_output"
+      ) {
+        if (!this.systemMediaService) return { result: { status: "unsupported" } };
+        const deviceId = p.deviceId ?? p.device_id ?? p.id;
+        if (typeof deviceId !== "string" || !deviceId) {
+          return { result: { status: "invalid_device" } };
+        }
+        const roles = parseAudioOutputRoles(p);
+        if (!roles) return { result: { status: "invalid_role" } };
+        const res = await this.systemMediaService.selectAudioOutput(deviceId, roles);
+        return { result: res };
       }
 
       if (

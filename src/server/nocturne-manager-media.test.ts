@@ -224,6 +224,42 @@ describe("NocturneManager system media routing", () => {
     await manager.systemMediaService?.stop();
   });
 
+  test("audio role validation blocks invalid RPC inputs before native switching", async () => {
+    const hostBridge = new FakeMediaHostBridge();
+    const manager = new NocturneManager({
+      platform: "win32", bluetoothService: fakeBluetoothService(), hostBridge,
+    });
+    const select = spyOn(manager.systemMediaService!, "selectAudioOutput");
+    const invalid = [
+      ...[[], null, undefined, "all", 1, false, {}, [null], [undefined], [1], ["console", false], ["unknown"]].map(roles => ({ roles })),
+      ...[null, [], {}, 1, false, "unknown"].map(role => ({ role })),
+      { roles: ["console"], role: null },
+      { roles: null, role: "all" },
+    ];
+    for (const method of ["audio.outputs.select", "media.set_audio_output", "audio.select_output"]) {
+      for (const params of invalid) {
+        expect(await manager.onCall("request", method, { deviceId: "device-2", ...params }))
+          .toEqual({ result: { status: "invalid_role" } });
+      }
+    }
+    expect(select).not.toHaveBeenCalled();
+    expect(hostBridge.calls).toEqual([]);
+    select.mockRestore();
+
+    for (const [params, roles] of [
+      [{}, ["console", "multimedia"]],
+      [{ role: "all" }, ["all"]],
+      [{ role: "communications" }, ["communications"]],
+      [{ roles: ["CONSOLE", "multimedia"] }, ["CONSOLE", "multimedia"]],
+      [{ roles: ["console"], role: "all" }, ["console"]],
+    ] as const) {
+      await manager.onCall("request", "audio.outputs.select", { deviceId: "device-2", ...params });
+      expect(hostBridge.calls.at(-1)).toEqual({
+        method: "audio.outputs.select", params: { deviceId: "device-2", roles },
+      });
+    }
+  });
+
   test("routes volume RPC methods to SystemMediaService", async () => {
     class FakeVolumeManagerBridge extends FakeMediaHostBridge {
       vol = 50;
