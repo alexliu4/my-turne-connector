@@ -58,12 +58,12 @@ describe("Config REST Routes & Security", () => {
       },
     });
     // Pass platform "win32" for testing Windows local route behavior
-    app = createConfigRoutes(appStore, macroStore, "win32");
+    app = createConfigRoutes(appStore, macroStore, "win32", "http://localhost");
   });
 
   it("lists apps and macros for localhost requests", async () => {
     const resApps = await app.handle(
-      new Request("http://localhost/api/config/apps"),
+      new Request("http://localhost/api/config/apps", { headers: { origin: "http://localhost" } }),
     );
     expect(resApps.status).toBe(200);
     const jsonApps = await resApps.json();
@@ -72,7 +72,7 @@ describe("Config REST Routes & Security", () => {
     expect(jsonApps.apps[0].id).toBe("vscode");
 
     const resMacros = await app.handle(
-      new Request("http://127.0.0.1/api/config/macros"),
+      new Request("http://localhost/api/config/macros", { headers: { origin: "http://localhost" } }),
     );
     expect(resMacros.status).toBe(200);
     const jsonMacros = await resMacros.json();
@@ -84,7 +84,7 @@ describe("Config REST Routes & Security", () => {
   it("rejects requests on non-Windows platforms", async () => {
     const linuxApp = createConfigRoutes(appStore, macroStore, "linux");
     const res = await linuxApp.handle(
-      new Request("http://localhost/api/config/apps"),
+      new Request("http://localhost/api/config/apps", { headers: { origin: "http://localhost" } }),
     );
     expect(res.status).toBe(403);
   });
@@ -162,7 +162,7 @@ describe("Config REST Routes & Security", () => {
     const res = await app.handle(
       new Request("http://localhost/api/config/apps", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", origin: "http://localhost" },
         body: JSON.stringify({
           id: "notepad",
           name: "Notepad",
@@ -185,6 +185,7 @@ describe("Config REST Routes & Security", () => {
     const res = await app.handle(
       new Request("http://localhost/api/config/apps/vscode", {
         method: "DELETE",
+        headers: { origin: "http://localhost" },
       }),
     );
     expect(res.status).toBe(200);
@@ -200,7 +201,7 @@ describe("Config REST Routes & Security", () => {
     const res = await app.handle(
       new Request("http://localhost/api/config/macros", {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: { "content-type": "application/json", origin: "http://localhost" },
         body: JSON.stringify({
           id: "invalid_macro",
           name: "Invalid Macro",
@@ -212,4 +213,54 @@ describe("Config REST Routes & Security", () => {
     const json = await res.json();
     expect(json.error).toBe("Invalid macro definition format or missing fields");
   });
+});
+
+it("protects both privileged route groups with permissive global CORS on the actual dynamic port", async () => {
+  const { Elysia } = await import("elysia");
+  const { cors } = await import("@elysiajs/cors");
+  const { createDiagnosticsRoutes } = await import("./diagnostics");
+  const { DiagnosticsService } = await import("../services/diagnostics-service");
+  const manager = {
+    refreshHostStatus: async () => null,
+    getConnectionStatus: () => ({ connected: false, deviceCount: 0, devices: [] }),
+    isHostBridgeConnected: () => false,
+  } as unknown as ConstructorParameters<typeof DiagnosticsService>[0];
+  const appStore = new MemoryAppStore({ apps: {} });
+  const macroStore = new MemoryMacroStore({ macros: {} });
+  const app = new Elysia().use(cors())
+    .use(createConfigRoutes(appStore, macroStore, "win32"))
+    .use(createDiagnosticsRoutes(new DiagnosticsService(manager), "win32"))
+    .listen({ hostname: "127.0.0.1", port: 0 });
+  try {
+    const origin = app.server!.url.origin;
+    for (const path of ["/api/config/apps", "/api/config/macros", "/api/diagnostics/status", "/api/diagnostics/export"]) {
+      for (const [headers, status] of [
+        [{ origin }, 200],
+        [{ "sec-fetch-site": "same-origin" }, 200],
+        [{ origin: "http://127.0.0.1:1" }, 403],
+        [{}, 403],
+      ] as const) {
+        const response = await fetch(`${origin}${path}`, { headers });
+        expect(response.status).toBe(status);
+        await response.text();
+      }
+    }
+    const rejected = await fetch(`${origin}/api/config/apps`, {
+      method: "POST",
+      headers: { origin: "http://127.0.0.1:1", "content-type": "application/json" },
+      body: JSON.stringify({ id: "untrusted", name: "Untrusted", target: "calc.exe" }),
+    });
+    expect(rejected.status).toBe(403);
+    expect(appStore.config.apps.untrusted).toBeUndefined();
+    await rejected.text();
+    const response = await fetch(`${origin}/api/config/apps`, {
+      method: "POST", headers: { origin, "content-type": "application/json" },
+      body: JSON.stringify({ id: "notepad", name: "Notepad", target: "notepad.exe" }),
+    });
+    expect(response.status).toBe(200);
+    expect(appStore.config.apps.notepad).toBeDefined();
+    await response.text();
+  } finally {
+    await app.stop();
+  }
 });

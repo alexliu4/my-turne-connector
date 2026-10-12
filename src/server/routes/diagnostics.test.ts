@@ -34,9 +34,9 @@ class MockDiagnosticsService implements Partial<DiagnosticsService> {
 describe("Diagnostics Routes & DiagnosticsService", () => {
   it("returns diagnostics status json for Windows localhost requests", async () => {
     const service = new MockDiagnosticsService(true, false) as unknown as DiagnosticsService;
-    const app = createDiagnosticsRoutes(service, "win32");
+    const app = createDiagnosticsRoutes(service, "win32", "http://localhost");
 
-    const res = await app.handle(new Request("http://localhost/api/diagnostics/status"));
+    const res = await app.handle(new Request("http://localhost/api/diagnostics/status", { headers: { origin: "http://localhost" } }));
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.status).toBe("ok");
@@ -47,9 +47,9 @@ describe("Diagnostics Routes & DiagnosticsService", () => {
 
   it("independently reports device connected while native host is unavailable", async () => {
     const service = new MockDiagnosticsService(false, true) as unknown as DiagnosticsService;
-    const app = createDiagnosticsRoutes(service, "win32");
+    const app = createDiagnosticsRoutes(service, "win32", "http://localhost");
 
-    const res = await app.handle(new Request("http://localhost/api/diagnostics/status"));
+    const res = await app.handle(new Request("http://localhost/api/diagnostics/status", { headers: { origin: "http://localhost" } }));
     expect(res.status).toBe(200);
     const json = await res.json();
     expect(json.diagnostics.hostBridgeConnected).toBe(false);
@@ -58,9 +58,9 @@ describe("Diagnostics Routes & DiagnosticsService", () => {
 
   it("exports redacted diagnostics as downloadable json file attachment", async () => {
     const service = new MockDiagnosticsService() as unknown as DiagnosticsService;
-    const app = createDiagnosticsRoutes(service, "win32");
+    const app = createDiagnosticsRoutes(service, "win32", "http://localhost");
 
-    const res = await app.handle(new Request("http://localhost/api/diagnostics/export"));
+    const res = await app.handle(new Request("http://localhost/api/diagnostics/export", { headers: { origin: "http://localhost" } }));
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("application/json");
     expect(res.headers.get("content-disposition")).toContain("attachment; filename=\"nocturne-connector-diagnostics-");
@@ -75,11 +75,11 @@ describe("Diagnostics Routes & DiagnosticsService", () => {
     const linuxService = new MockDiagnosticsService() as unknown as DiagnosticsService;
     const linuxApp = createDiagnosticsRoutes(linuxService, "linux");
 
-    const resLinux = await linuxApp.handle(new Request("http://localhost/api/diagnostics/status"));
+    const resLinux = await linuxApp.handle(new Request("http://localhost/api/diagnostics/status", { headers: { origin: "http://localhost" } }));
     expect(resLinux.status).toBe(403);
 
     const winService = new MockDiagnosticsService() as unknown as DiagnosticsService;
-    const winApp = createDiagnosticsRoutes(winService, "win32");
+    const winApp = createDiagnosticsRoutes(winService, "win32", "http://localhost");
 
     const resCrossSite = await winApp.handle(
       new Request("http://localhost/api/diagnostics/status", {
@@ -88,4 +88,35 @@ describe("Diagnostics Routes & DiagnosticsService", () => {
     );
     expect(resCrossSite.status).toBe(403);
   });
+});
+
+it("omits JSON secrets from complete status and export HTTP responses", async () => {
+  const { createLogger } = await import("../utils/logger");
+  const secrets = {
+    access_token: "sensitive-example-value",
+    refresh_token: "refresh-example-value",
+    password: "password-example-value",
+    secret: "secret-example-value",
+    api_key: "apikey-example-value",
+    authorization: "authorization-example-value",
+  };
+  const log = createLogger("DiagnosticsTest");
+  log.warn(`Failed response ${JSON.stringify(secrets)}`);
+  log.error(`Escaped response ${JSON.stringify(JSON.stringify(secrets))}`);
+  log.warn('Malformed response {"access_token":"sensitive-example-value');
+  const manager = {
+    refreshHostStatus: async () => null,
+    getConnectionStatus: () => ({ connected: false, deviceCount: 0, devices: [] }),
+    isHostBridgeConnected: () => false,
+  } as unknown as ConstructorParameters<typeof DiagnosticsService>[0];
+  const app = createDiagnosticsRoutes(new DiagnosticsService(manager), "win32", "http://localhost");
+  for (const path of ["status", "export"]) {
+    const res = await app.handle(new Request(`http://localhost/api/diagnostics/${path}`, {
+      headers: { origin: "http://localhost" },
+    }));
+    expect(res.status).toBe(200);
+    const serialized = await res.text();
+    for (const secret of Object.values(secrets)) expect(serialized).not.toContain(secret);
+    expect(serialized).toContain("Recent WARN entries:");
+  }
 });

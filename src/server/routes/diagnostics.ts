@@ -8,10 +8,11 @@ const log = createLogger("DiagnosticsRoutes");
 export function createDiagnosticsRoutes(
   diagnosticsService: DiagnosticsService,
   platform: NodeJS.Platform = process.platform,
+  listeningOrigin?: string,
 ) {
   return new Elysia({ prefix: "/api/diagnostics" })
-    .onBeforeHandle(({ request, set }) => {
-      if (!isLocalhostRequest(request, platform)) {
+    .onBeforeHandle(({ request, set, server }) => {
+      if (!isLocalhostRequest(request, platform, server?.url.origin ?? listeningOrigin)) {
         log.warn(`Rejecting non-localhost diagnostics request from ${request.headers.get("host") || "unknown"}`);
         set.status = 403;
         return { error: "Diagnostics API is localhost-only" };

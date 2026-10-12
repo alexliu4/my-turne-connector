@@ -34,7 +34,13 @@ export class DiagnosticsService {
     }));
 
     const rawLogs = getRecentLogs();
-    const redactedLogs = rawLogs.map((line) => redactSensitiveText(line));
+    // Arbitrary log text can contain embedded, escaped, or malformed JSON and
+    // unlabeled secrets. Export only fixed severity counts, never log payloads.
+    const redactedLogs = ["WARN", "ERROR"].map((level) => {
+      const prefix = new RegExp(`^\\[\\d{4}-\\d{2}-\\d{2}T[\\d:.]+Z\\] \\[${level}\\] \\[`);
+      const count = rawLogs.filter((line) => prefix.test(line)).length;
+      return `Recent ${level} entries: ${count}`;
+    });
 
     const report: DiagnosticsReport = {
       timestamp: new Date().toISOString(),

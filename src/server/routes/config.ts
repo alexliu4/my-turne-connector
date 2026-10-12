@@ -18,10 +18,11 @@ export function createConfigRoutes(
   appStore: AppLaunchPreferenceStore = new FileSystemAppLaunchPreferenceStore(),
   macroStore: MacroPreferenceStore = new FileSystemMacroPreferenceStore(),
   platform: NodeJS.Platform = process.platform,
+  listeningOrigin?: string,
 ) {
   return new Elysia({ prefix: "/api/config" })
-    .onBeforeHandle(({ request, set }) => {
-      if (!isLocalhostRequest(request, platform)) {
+    .onBeforeHandle(({ request, set, server }) => {
+      if (!isLocalhostRequest(request, platform, server?.url.origin ?? listeningOrigin)) {
         log.warn(`Rejecting non-localhost config request from ${request.headers.get("host") || "unknown"}`);
         set.status = 403;
         return { error: "Configuration API is localhost-only" };
