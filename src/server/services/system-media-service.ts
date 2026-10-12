@@ -329,9 +329,10 @@ export class SystemMediaService {
     return { status: "ok", volume_percent, muted };
   }
 
-  async getAudioOutputs(): Promise<GetAudioOutputsResponse> {
+  async getAudioOutputs(options?: { timeoutMs?: number }): Promise<GetAudioOutputsResponse> {
     try {
-      const response = await this.hostBridge.call<unknown>("audio.outputs.list", {});
+      const callOptions = { timeoutMs: options?.timeoutMs ?? 3000 };
+      const response = await this.hostBridge.call<unknown>("audio.outputs.list", {}, callOptions);
       const rec = asRecord(response);
       if (!rec || rec.status === "unsupported") {
         return { status: "unsupported", devices: [] };
@@ -363,7 +364,7 @@ export class SystemMediaService {
     }
   }
 
-  async selectAudioOutput(deviceId: string, roles?: string[]): Promise<SelectAudioOutputResponse> {
+  async selectAudioOutput(deviceId: string, roles?: string[], options?: { timeoutMs?: number }): Promise<SelectAudioOutputResponse> {
     if (typeof deviceId !== "string" || deviceId.trim().length === 0) {
       return { status: "invalid_device" };
     }
@@ -372,7 +373,8 @@ export class SystemMediaService {
       if (Array.isArray(roles) && roles.length > 0) {
         params.roles = roles;
       }
-      const response = await this.hostBridge.call<unknown>("audio.outputs.select", params);
+      const callOptions = { timeoutMs: options?.timeoutMs ?? 3000 };
+      const response = await this.hostBridge.call<unknown>("audio.outputs.select", params, callOptions);
       const rec = asRecord(response);
       const status = (rec?.status as string) ?? "unsupported";
       const confirmed = typeof rec?.confirmed === "boolean" ? rec.confirmed : undefined;

@@ -37,7 +37,7 @@ const ARTWORK_MAX_PIXEL_SIZE: u32 = 300;
 const HUNDRED_NS_PER_MILLISECOND: i64 = 10_000;
 const WINDOWS_TO_UNIX_EPOCH_SECONDS: i128 = 11_644_473_600;
 
-#[windows_core::interface("f8679f50-850a-41cf-9c72-430f23b92706")]
+#[windows_core::interface("f8679f50-850a-41cf-9c72-430f290290c8")]
 unsafe trait IPolicyConfig: IUnknown {
     fn GetMixFormat(&self, pszdeviceid: PCWSTR, ppformat: *mut std::ffi::c_void) -> HRESULT;
     fn GetDeviceFormat(
@@ -86,7 +86,7 @@ unsafe trait IPolicyConfig: IUnknown {
 }
 
 const CLSID_POLICY_CONFIG: windows::core::GUID =
-    windows::core::GUID::from_u128(0x87019283_a7b3_45d9_a08b_41904d0758d8);
+    windows::core::GUID::from_u128(0x870af99c_171d_4f9e_af0d_e63df40c2bc9);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TimelineSample {
@@ -699,7 +699,10 @@ impl WindowsMediaState {
                     Some(id) if !id.trim().is_empty() => id.trim(),
                     _ => return Ok(json!({ "status": "invalid_device" })),
                 };
-                let roles = parse_roles(&params);
+                let roles = match parse_roles(&params) {
+                    Ok(r) => r,
+                    Err(_) => return Ok(json!({ "status": "invalid_role" })),
+                };
                 Ok(select_audio_output(device_id, roles))
             }
             "media.control" => self.control(bridge, params).await,
@@ -1272,11 +1275,11 @@ fn get_audio_outputs() -> Value {
 fn get_device_friendly_name(device: &IMMDevice) -> Option<String> {
     unsafe {
         let store: IPropertyStore = device.OpenPropertyStore(STGM_READ).ok()?;
-        let PKEY_Device_FriendlyName = windows::Win32::Foundation::PROPERTYKEY {
+        let pkey_device_friendly_name = windows::Win32::Foundation::PROPERTYKEY {
             fmtid: windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
             pid: 14,
         };
-        let prop = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
+        let prop = store.GetValue(&pkey_device_friendly_name).ok()?;
         let name = prop.to_string();
         if name.trim().is_empty() {
             None
@@ -1286,20 +1289,28 @@ fn get_device_friendly_name(device: &IMMDevice) -> Option<String> {
     }
 }
 
-fn parse_roles(params: &Value) -> Vec<ERole> {
+fn parse_roles(params: &Value) -> Result<Vec<ERole>, String> {
     let mut roles = Vec::new();
     if let Some(r) = params.get("roles").and_then(Value::as_array) {
+        if r.is_empty() {
+            return Err("Explicit roles list cannot be empty".to_string());
+        }
         for v in r {
-            if let Some(s) = v.as_str() {
-                match s.to_ascii_lowercase().as_str() {
-                    "console" => roles.push(eConsole),
-                    "multimedia" => roles.push(eMultimedia),
-                    "communications" => roles.push(eCommunications),
-                    _ => {}
+            let s = v.as_str().ok_or_else(|| "Role item must be a string".to_string())?;
+            match s.to_ascii_lowercase().as_str() {
+                "console" => roles.push(eConsole),
+                "multimedia" => roles.push(eMultimedia),
+                "communications" => roles.push(eCommunications),
+                "all" => {
+                    roles.push(eConsole);
+                    roles.push(eMultimedia);
+                    roles.push(eCommunications);
                 }
+                _ => return Err(format!("Invalid role requested: {s}")),
             }
         }
-    } else if let Some(role_str) = params.get("role").and_then(Value::as_str) {
+    } else if let Some(v) = params.get("role") {
+        let role_str = v.as_str().ok_or_else(|| "Role parameter must be a string".to_string())?;
         match role_str.to_ascii_lowercase().as_str() {
             "console" => roles.push(eConsole),
             "multimedia" => roles.push(eMultimedia),
@@ -1309,14 +1320,14 @@ fn parse_roles(params: &Value) -> Vec<ERole> {
                 roles.push(eMultimedia);
                 roles.push(eCommunications);
             }
-            _ => {}
+            _ => return Err(format!("Invalid role requested: {role_str}")),
         }
     }
     if roles.is_empty() {
         roles.push(eConsole);
         roles.push(eMultimedia);
     }
-    roles
+    Ok(roles)
 }
 
 fn select_audio_output(device_id: &str, roles: Vec<ERole>) -> Value {
@@ -1366,16 +1377,27 @@ fn select_audio_output(device_id: &str, roles: Vec<ERole>) -> Value {
         for &role in &roles {
             let hr = policy_config.SetDefaultEndpoint(pcwstr, role);
             if hr.is_err() {
-                return json!({ "status": "access_denied" });
+                let err_code = hr.0 as u32;
+                let status_str = if err_code == 0x80070005 {
+                    "access_denied"
+                } else {
+                    "failed"
+                };
+                return json!({ "status": status_str, "errorCode": err_code });
             }
         }
 
-        let default_console = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
-            .and_then(|d| d.GetId())
-            .ok()
-            .and_then(|pwstr| pwstr.to_string().ok());
-
-        let confirmed = default_console.as_deref() == Some(device_id);
+        let mut confirmed = true;
+        for &role in &roles {
+            let current_default = enumerator.GetDefaultAudioEndpoint(eRender, role)
+                .and_then(|d| d.GetId())
+                .ok()
+                .and_then(|pwstr| pwstr.to_string().ok());
+            if current_default.as_deref() != Some(device_id) {
+                confirmed = false;
+                break;
+            }
+        }
 
         if confirmed {
             json!({
@@ -1575,10 +1597,17 @@ mod tests {
 
     #[test]
     fn parse_roles_defaults_to_console_and_multimedia() {
-        let roles = parse_roles(&json!({}));
+        let roles = parse_roles(&json!({})).unwrap();
         assert_eq!(roles, vec![eConsole, eMultimedia]);
 
-        let roles_explicit = parse_roles(&json!({ "roles": ["communications"] }));
+        let roles_explicit = parse_roles(&json!({ "roles": ["communications"] })).unwrap();
         assert_eq!(roles_explicit, vec![eCommunications]);
+
+        let roles_all = parse_roles(&json!({ "role": "all" })).unwrap();
+        assert_eq!(roles_all, vec![eConsole, eMultimedia, eCommunications]);
+
+        assert!(parse_roles(&json!({ "roles": [] })).is_err());
+        assert!(parse_roles(&json!({ "roles": ["invalid_role"] })).is_err());
+        assert!(parse_roles(&json!({ "role": "invalid_role" })).is_err());
     }
 }

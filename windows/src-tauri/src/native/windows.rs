@@ -60,7 +60,7 @@ impl WindowsNativeState {
         if method.starts_with("bluetooth.") || method.starts_with("rfcomm.") {
             return self.bluetooth.dispatch(bridge, method, params).await;
         }
-        if method.starts_with("media.") || method.starts_with("volume.") {
+        if method.starts_with("media.") || method.starts_with("volume.") || method.starts_with("audio.") {
             return self.media.dispatch(bridge, method, params).await;
         }
         if method.starts_with("discord.") {
@@ -100,5 +100,18 @@ impl WindowsNativeState {
             return security::unprotect(value).map(|value| serde_json::json!({ "value": value }));
         }
         Err(format!("Unsupported native host method: {method}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn dispatches_audio_methods_to_media_state() {
+        let state = WindowsNativeState::new();
+        let bridge = BridgeServer::new("token".to_string());
+        let list_res = state.dispatch(&bridge, "audio.outputs.list", Value::Null).await;
+        assert!(list_res.is_ok());
     }
 }
