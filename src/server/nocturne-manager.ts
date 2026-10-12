@@ -751,6 +751,31 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       }
 
       if (
+        method === "audio.outputs.list" ||
+        method === "media.get_audio_outputs" ||
+        method === "audio.get_outputs"
+      ) {
+        if (!this.systemMediaService) return { result: { status: "unsupported", devices: [] } };
+        const res = await this.systemMediaService.getAudioOutputs();
+        return { result: res };
+      }
+
+      if (
+        method === "audio.outputs.select" ||
+        method === "media.set_audio_output" ||
+        method === "audio.select_output"
+      ) {
+        if (!this.systemMediaService) return { result: { status: "unsupported" } };
+        const deviceId = p.deviceId ?? p.device_id ?? p.id;
+        if (typeof deviceId !== "string" || !deviceId) {
+          return { result: { status: "invalid_device" } };
+        }
+        const roles = Array.isArray(p.roles) ? p.roles : (typeof p.role === "string" ? [p.role] : undefined);
+        const res = await this.systemMediaService.selectAudioOutput(deviceId, roles);
+        return { result: res };
+      }
+
+      if (
         method === "app.launch" ||
         method === "app_launch.launch" ||
         method === "appLaunch.launch"

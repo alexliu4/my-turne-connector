@@ -11,7 +11,7 @@ use std::{
 };
 use tauri::async_runtime;
 use tokio::time::sleep;
-use windows::core::{implement, Interface};
+use windows::core::{implement, Interface, HRESULT, PCWSTR, IUnknown, IUnknown_Vtbl};
 use windows::Media::Control::{
     GlobalSystemMediaTransportControlsSession, GlobalSystemMediaTransportControlsSessionManager,
     GlobalSystemMediaTransportControlsSessionPlaybackStatus,
@@ -20,12 +20,14 @@ use windows::Media::MediaPlaybackAutoRepeatMode;
 use windows::Storage::Streams::DataReader;
 use windows::Win32::Media::Audio::Endpoints::IAudioEndpointVolume;
 use windows::Win32::Media::Audio::{
-    eConsole, eRender, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl,
-    MMDeviceEnumerator,
+    eCommunications, eConsole, eMultimedia, eRender, ERole, IMMDevice, IMMDeviceCollection,
+    IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
+    DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CLSCTX_ALL, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, STGM_READ, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
+use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 const TIMELINE_REANCHOR_INTERVAL: Duration = Duration::from_secs(1);
@@ -34,6 +36,57 @@ const PAUSED_TIMELINE_CHANGE_THRESHOLD_MS: u64 = 250;
 const ARTWORK_MAX_PIXEL_SIZE: u32 = 300;
 const HUNDRED_NS_PER_MILLISECOND: i64 = 10_000;
 const WINDOWS_TO_UNIX_EPOCH_SECONDS: i128 = 11_644_473_600;
+
+#[windows_core::interface("f8679f50-850a-41cf-9c72-430f23b92706")]
+unsafe trait IPolicyConfig: IUnknown {
+    fn GetMixFormat(&self, pszdeviceid: PCWSTR, ppformat: *mut std::ffi::c_void) -> HRESULT;
+    fn GetDeviceFormat(
+        &self,
+        pszdeviceid: PCWSTR,
+        bdefault: i32,
+        ppformat: *mut std::ffi::c_void,
+    ) -> HRESULT;
+    fn ResetDeviceFormat(&self, pszdeviceid: PCWSTR) -> HRESULT;
+    fn SetDeviceFormat(
+        &self,
+        pszdeviceid: PCWSTR,
+        pendpointformat: *const std::ffi::c_void,
+        pmixformat: *const std::ffi::c_void,
+    ) -> HRESULT;
+    fn GetProcessingPeriod(
+        &self,
+        pszdeviceid: PCWSTR,
+        bdefault: i32,
+        pmftperiod: *mut i64,
+        pdefaultperiod: *mut i64,
+    ) -> HRESULT;
+    fn SetProcessingPeriod(
+        &self,
+        pszdeviceid: PCWSTR,
+        pmftperiod: *const i64,
+    ) -> HRESULT;
+    fn GetShareMode(&self, pszdeviceid: PCWSTR, pmode: *mut std::ffi::c_void) -> HRESULT;
+    fn SetShareMode(&self, pszdeviceid: PCWSTR, pmode: *const std::ffi::c_void) -> HRESULT;
+    fn GetPropertyValue(
+        &self,
+        pszdeviceid: PCWSTR,
+        bclient: i32,
+        pkey: *const std::ffi::c_void,
+        pv: *mut std::ffi::c_void,
+    ) -> HRESULT;
+    fn SetPropertyValue(
+        &self,
+        pszdeviceid: PCWSTR,
+        bclient: i32,
+        pkey: *const std::ffi::c_void,
+        pv: *const std::ffi::c_void,
+    ) -> HRESULT;
+    fn SetDefaultEndpoint(&self, pszdeviceid: PCWSTR, role: ERole) -> HRESULT;
+    fn SetEndpointVisibility(&self, pszdeviceid: PCWSTR, bvisible: i32) -> HRESULT;
+}
+
+const CLSID_POLICY_CONFIG: windows::core::GUID =
+    windows::core::GUID::from_u128(0x87019283_a7b3_45d9_a08b_41904d0758d8);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct TimelineSample {
@@ -638,6 +691,17 @@ impl WindowsMediaState {
                 }
                 Ok(val)
             }
+            "audio.outputs.list" | "media.get_audio_outputs" => {
+                Ok(get_audio_outputs())
+            }
+            "audio.outputs.select" | "media.set_audio_output" => {
+                let device_id = match params.get("deviceId").or_else(|| params.get("device_id")).and_then(Value::as_str) {
+                    Some(id) if !id.trim().is_empty() => id.trim(),
+                    _ => return Ok(json!({ "status": "invalid_device" })),
+                };
+                let roles = parse_roles(&params);
+                Ok(select_audio_output(device_id, roles))
+            }
             "media.control" => self.control(bridge, params).await,
             _ => Err(format!("Unsupported native media method: {method}")),
         }
@@ -1134,6 +1198,201 @@ fn step_volume(delta: f32) -> Value {
     }
 }
 
+fn get_audio_outputs() -> Value {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            Ok(e) => e,
+            Err(_) => return json!({ "status": "unsupported", "devices": [] }),
+        };
+
+        let collection: IMMDeviceCollection = match enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+            Ok(c) => c,
+            Err(_) => return json!({ "status": "unsupported", "devices": [] }),
+        };
+
+        let count = match collection.GetCount() {
+            Ok(c) => c,
+            Err(_) => return json!({ "status": "ok", "devices": [] }),
+        };
+
+        let default_console_id = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
+            .and_then(|d| d.GetId())
+            .ok()
+            .and_then(|pwstr| pwstr.to_string().ok());
+        let default_multimedia_id = enumerator.GetDefaultAudioEndpoint(eRender, eMultimedia)
+            .and_then(|d| d.GetId())
+            .ok()
+            .and_then(|pwstr| pwstr.to_string().ok());
+        let default_communications_id = enumerator.GetDefaultAudioEndpoint(eRender, eCommunications)
+            .and_then(|d| d.GetId())
+            .ok()
+            .and_then(|pwstr| pwstr.to_string().ok());
+
+        let mut devices = Vec::new();
+
+        for i in 0..count {
+            let device: IMMDevice = match collection.Item(i) {
+                Ok(d) => d,
+                Err(_) => continue,
+            };
+
+            let id = match device.GetId().ok().and_then(|pwstr| pwstr.to_string().ok()) {
+                Some(id) => id,
+                None => continue,
+            };
+
+            let name = get_device_friendly_name(&device).unwrap_or_else(|| "Audio Output".to_string());
+
+            let is_default_console = default_console_id.as_deref() == Some(&id);
+            let is_default_multimedia = default_multimedia_id.as_deref() == Some(&id);
+            let is_default_communications = default_communications_id.as_deref() == Some(&id);
+
+            devices.push(json!({
+                "id": id,
+                "name": name,
+                "state": "active",
+                "isDefault": is_default_console,
+                "defaultRoles": {
+                    "console": is_default_console,
+                    "multimedia": is_default_multimedia,
+                    "communications": is_default_communications
+                }
+            }));
+        }
+
+        json!({
+            "status": "ok",
+            "selectedDeviceId": default_console_id,
+            "devices": devices
+        })
+    }
+}
+
+fn get_device_friendly_name(device: &IMMDevice) -> Option<String> {
+    unsafe {
+        let store: IPropertyStore = device.OpenPropertyStore(STGM_READ).ok()?;
+        let PKEY_Device_FriendlyName = windows::Win32::Foundation::PROPERTYKEY {
+            fmtid: windows::core::GUID::from_u128(0xa45c254e_df1c_4efd_8020_67d146a850e0),
+            pid: 14,
+        };
+        let prop = store.GetValue(&PKEY_Device_FriendlyName).ok()?;
+        let name = prop.to_string();
+        if name.trim().is_empty() {
+            None
+        } else {
+            Some(name)
+        }
+    }
+}
+
+fn parse_roles(params: &Value) -> Vec<ERole> {
+    let mut roles = Vec::new();
+    if let Some(r) = params.get("roles").and_then(Value::as_array) {
+        for v in r {
+            if let Some(s) = v.as_str() {
+                match s.to_ascii_lowercase().as_str() {
+                    "console" => roles.push(eConsole),
+                    "multimedia" => roles.push(eMultimedia),
+                    "communications" => roles.push(eCommunications),
+                    _ => {}
+                }
+            }
+        }
+    } else if let Some(role_str) = params.get("role").and_then(Value::as_str) {
+        match role_str.to_ascii_lowercase().as_str() {
+            "console" => roles.push(eConsole),
+            "multimedia" => roles.push(eMultimedia),
+            "communications" => roles.push(eCommunications),
+            "all" => {
+                roles.push(eConsole);
+                roles.push(eMultimedia);
+                roles.push(eCommunications);
+            }
+            _ => {}
+        }
+    }
+    if roles.is_empty() {
+        roles.push(eConsole);
+        roles.push(eMultimedia);
+    }
+    roles
+}
+
+fn select_audio_output(device_id: &str, roles: Vec<ERole>) -> Value {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            Ok(e) => e,
+            Err(_) => return json!({ "status": "unsupported" }),
+        };
+
+        let collection: IMMDeviceCollection = match enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+            Ok(c) => c,
+            Err(_) => return json!({ "status": "unsupported" }),
+        };
+
+        let count = match collection.GetCount() {
+            Ok(c) => c,
+            Err(_) => return json!({ "status": "device_missing" }),
+        };
+
+        let mut found = false;
+        for i in 0..count {
+            if let Ok(device) = collection.Item(i) {
+                if let Ok(pwstr) = device.GetId() {
+                    if let Ok(id) = pwstr.to_string() {
+                        if id == device_id {
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !found {
+            return json!({ "status": "device_missing" });
+        }
+
+        let policy_config: IPolicyConfig = match CoCreateInstance(&CLSID_POLICY_CONFIG, None, CLSCTX_ALL) {
+            Ok(p) => p,
+            Err(_) => return json!({ "status": "unsupported" }),
+        };
+
+        let wide_id: Vec<u16> = device_id.encode_utf16().chain(std::iter::once(0)).collect();
+        let pcwstr = PCWSTR(wide_id.as_ptr());
+
+        for &role in &roles {
+            let hr = policy_config.SetDefaultEndpoint(pcwstr, role);
+            if hr.is_err() {
+                return json!({ "status": "access_denied" });
+            }
+        }
+
+        let default_console = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
+            .and_then(|d| d.GetId())
+            .ok()
+            .and_then(|pwstr| pwstr.to_string().ok());
+
+        let confirmed = default_console.as_deref() == Some(device_id);
+
+        if confirmed {
+            json!({
+                "status": "ok",
+                "deviceId": device_id,
+                "confirmed": true
+            })
+        } else {
+            json!({
+                "status": "failed",
+                "deviceId": device_id,
+                "confirmed": false
+            })
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1312,5 +1571,14 @@ mod tests {
             now_playing_core_signature(&first),
             now_playing_core_signature(&second)
         );
+    }
+
+    #[test]
+    fn parse_roles_defaults_to_console_and_multimedia() {
+        let roles = parse_roles(&json!({}));
+        assert_eq!(roles, vec![eConsole, eMultimedia]);
+
+        let roles_explicit = parse_roles(&json!({ "roles": ["communications"] }));
+        assert_eq!(roles_explicit, vec![eCommunications]);
     }
 }

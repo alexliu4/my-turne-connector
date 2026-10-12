@@ -41,6 +41,30 @@ export interface MediaNowPlayingArtwork {
   media_generation: number;
 }
 
+export interface AudioOutputDevice {
+  id: string;
+  name: string;
+  state: string;
+  isDefault: boolean;
+  defaultRoles: {
+    console: boolean;
+    multimedia: boolean;
+    communications: boolean;
+  };
+}
+
+export interface GetAudioOutputsResponse {
+  status: string;
+  selectedDeviceId?: string | null;
+  devices: AudioOutputDevice[];
+}
+
+export interface SelectAudioOutputResponse {
+  status: string;
+  deviceId?: string;
+  confirmed?: boolean;
+}
+
 export interface SystemMediaSink {
   sendEvent(topic: string, data: unknown): Promise<void>;
   sendVolume(volumePercent: number, muted?: boolean): Promise<void>;
@@ -303,6 +327,61 @@ export class SystemMediaService {
     this.muted = muted;
     this.volumeSupported = true;
     return { status: "ok", volume_percent, muted };
+  }
+
+  async getAudioOutputs(): Promise<GetAudioOutputsResponse> {
+    try {
+      const response = await this.hostBridge.call<unknown>("audio.outputs.list", {});
+      const rec = asRecord(response);
+      if (!rec || rec.status === "unsupported") {
+        return { status: "unsupported", devices: [] };
+      }
+      const status = (rec.status as string) ?? "ok";
+      const selectedDeviceId = typeof rec.selectedDeviceId === "string" ? rec.selectedDeviceId : (rec.selectedDeviceId === null ? null : undefined);
+      const rawDevices = Array.isArray(rec.devices) ? rec.devices : [];
+      const devices: AudioOutputDevice[] = rawDevices
+        .map(asRecord)
+        .filter((item): item is Record<string, unknown> => item !== null && typeof item.id === "string")
+        .map((item) => {
+          const roles = asRecord(item.defaultRoles);
+          return {
+            id: item.id as string,
+            name: typeof item.name === "string" ? item.name : "Audio Output",
+            state: typeof item.state === "string" ? item.state : "active",
+            isDefault: item.isDefault === true,
+            defaultRoles: {
+              console: roles?.console === true,
+              multimedia: roles?.multimedia === true,
+              communications: roles?.communications === true,
+            },
+          };
+        });
+      return { status, selectedDeviceId, devices };
+    } catch (error) {
+      log.warn(`Get audio outputs failed: ${errorMessage(error)}`);
+      return { status: "unsupported", devices: [] };
+    }
+  }
+
+  async selectAudioOutput(deviceId: string, roles?: string[]): Promise<SelectAudioOutputResponse> {
+    if (typeof deviceId !== "string" || deviceId.trim().length === 0) {
+      return { status: "invalid_device" };
+    }
+    try {
+      const params: Record<string, unknown> = { deviceId: deviceId.trim() };
+      if (Array.isArray(roles) && roles.length > 0) {
+        params.roles = roles;
+      }
+      const response = await this.hostBridge.call<unknown>("audio.outputs.select", params);
+      const rec = asRecord(response);
+      const status = (rec?.status as string) ?? "unsupported";
+      const confirmed = typeof rec?.confirmed === "boolean" ? rec.confirmed : undefined;
+      const returnedDeviceId = typeof rec?.deviceId === "string" ? rec.deviceId : undefined;
+      return { status, deviceId: returnedDeviceId, confirmed };
+    } catch (error) {
+      log.warn(`Select audio output failed: ${errorMessage(error)}`);
+      return { status: "unsupported" };
+    }
   }
 
   async handleControl(method: string): Promise<HostMediaControlStatus | null> {
