@@ -49,6 +49,23 @@ class FakeHostBridge implements HostBridgeClient {
     },
   ];
   selectedDeviceId: string | null = "device-1";
+  audioSessionsStatus = "ok";
+  audioSessions = [
+    {
+      id: "1234:Spotify",
+      appName: "Spotify",
+      processId: 1234,
+      volumePercent: 80,
+      muted: false,
+    },
+    {
+      id: "5678:Discord",
+      appName: "Discord",
+      processId: 5678,
+      volumePercent: 60,
+      muted: true,
+    },
+  ];
 
   async call<TResult = unknown>(
     method: string,
@@ -75,6 +92,27 @@ class FakeHostBridge implements HostBridgeClient {
       } else {
         this.selectedDeviceId = p.deviceId;
         response = { status: "ok", deviceId: p.deviceId, confirmed: true };
+      }
+    } else if (method === "audio.sessions.list") {
+      response = {
+        status: this.audioSessionsStatus,
+        sessions: this.audioSessions,
+      };
+    } else if (method === "audio.sessions.set_volume") {
+      const p = params as { sessionId?: string; volumePercent?: number };
+      if (!p.sessionId || p.sessionId === "missing") {
+        response = { status: "invalid_session" };
+      } else if (p.volumePercent === undefined || p.volumePercent > 100) {
+        response = { status: "invalid_volume" };
+      } else {
+        response = { status: "ok", confirmedVolumePercent: p.volumePercent };
+      }
+    } else if (method === "audio.sessions.set_mute") {
+      const p = params as { sessionId?: string; muted?: boolean };
+      if (!p.sessionId || p.sessionId === "missing") {
+        response = { status: "invalid_session" };
+      } else {
+        response = { status: "ok", confirmedMuted: p.muted };
       }
     }
     return response as TResult;
@@ -165,6 +203,59 @@ describe("SystemMediaService - Audio Output Discovery & Switching", () => {
     expect(host.calls.at(-1)).toEqual({
       method: "audio.outputs.select",
       params: { deviceId: "device-2", roles: ["console", "multimedia"] },
+    });
+  });
+
+  test("getAudioSessions enumerates active audio sessions", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.getAudioSessions();
+    expect(result.status).toBe("ok");
+    expect(result.sessions).toHaveLength(2);
+    expect(result.sessions[0]).toEqual({
+      id: "1234:Spotify",
+      appName: "Spotify",
+      processId: 1234,
+      volumePercent: 80,
+      muted: false,
+    });
+    expect(host.calls.at(-1)).toEqual({ method: "audio.sessions.list", params: {} });
+  });
+
+  test("setAudioSessionVolume updates session volume", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.setAudioSessionVolume("1234:Spotify", 75);
+    expect(result.status).toBe("ok");
+    expect(result.confirmedVolumePercent).toBe(75);
+    expect(host.calls.at(-1)).toEqual({
+      method: "audio.sessions.set_volume",
+      params: { sessionId: "1234:Spotify", volumePercent: 75 },
+    });
+  });
+
+  test("setAudioSessionVolume handles invalid session and invalid volume", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    expect(await service.setAudioSessionVolume("", 50)).toEqual({ status: "invalid_session" });
+    expect(await service.setAudioSessionVolume("1234:Spotify", -1)).toEqual({ status: "invalid_volume" });
+    expect(await service.setAudioSessionVolume("1234:Spotify", 101)).toEqual({ status: "invalid_volume" });
+    expect(await service.setAudioSessionVolume("missing", 50)).toEqual({ status: "invalid_session" });
+  });
+
+  test("setAudioSessionMute updates session mute status", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.setAudioSessionMute("1234:Spotify", true);
+    expect(result.status).toBe("ok");
+    expect(result.confirmedMuted).toBeTrue();
+    expect(host.calls.at(-1)).toEqual({
+      method: "audio.sessions.set_mute",
+      params: { sessionId: "1234:Spotify", muted: true },
     });
   });
 
