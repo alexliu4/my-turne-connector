@@ -4,7 +4,7 @@
 
 ### 1. `audio.sessions.list` (or `media.get_audio_sessions`)
 
-Enumerates active Core Audio sessions on the specified render device (or default console render endpoint if `deviceId` is omitted).
+Enumerates active Core Audio sessions on the specified render device (or across all active render endpoints if `deviceId` is omitted).
 
 #### Request Params
 - `deviceId` (string, optional): Opaque device GUID ID string returned by `audio.outputs.list`.
@@ -53,6 +53,13 @@ Sets the master volume scalar for a specific audio session by exact session ID.
 }
 ```
 
+When rapid dial turns send multiple volume requests while a native call is in-flight, intermediate superseded requests resolve immediately with:
+```json
+{
+  "status": "superseded"
+}
+```
+
 ---
 
 ### 3. `audio.sessions.set_mute` (or `media.set_audio_session_mute`)
@@ -74,6 +81,7 @@ Sets the mute status for a specific audio session by exact session ID.
 
 #### Status Values
 - `"ok"`: Successfully queried, modified, and verified audio session volume/mute state.
+- `"superseded"`: Intermediate volume update superseded by a newer dial update during rapid dial movement.
 - `"invalid_session"`: Session ID is empty, missing, or inactive/disappeared.
 - `"invalid_volume"`: Volume percentage is out of range (not 0-100) or non-finite.
 - `"failed"`: Native mutation or read-back confirmation failed.
@@ -85,15 +93,18 @@ Sets the mute status for a specific audio session by exact session ID.
 
 - **Opaque Session IDs:** Session IDs are 16-character hexadecimal hashes (`{:016x}`) computed deterministically from the endpoint ID and Windows Core Audio `IAudioSessionControl2::GetSessionInstanceIdentifier()`.
 - **Exact Session Matching:** Prefix, process ID, or fallback matching is strictly prohibited. Every mutation targets exactly one session instance.
+- **Endpoint Resolution:** Native volume and mute functions resolve target sessions across active render endpoints even when `deviceId` is omitted.
 - **Lifetime & Invalidation:** Session IDs are session-scoped and endpoint-specific. When an application exits, restarts, or closes its audio stream, its old session ID is invalidated and will return `status: "invalid_session"`.
 
 ---
 
 ## Rapid Dial Movement & Coalescing Strategy
 
-- When rapid volume adjustments target the same session (e.g., dial turns on the Car Thing), `SystemMediaService` maintains an in-flight queue per session ID using a **latest-value-wins** strategy.
-- While a volume call is in-flight, intermediate dial updates update the queued target volume without triggering redundant RPC calls over Bluetooth or native bridge overhead.
-- Once the in-flight request finishes, the queued latest target is sent immediately.
+- When rapid volume adjustments target the same session (e.g., dial turns on the Car Thing), `SystemMediaService` maintains a strictly bounded queue per session ID:
+  - At most **one native request in-flight**.
+  - At most **one pending target and resolver**.
+- When a new dial request arrives while a target is already pending, the old pending promise resolves immediately with `status: "superseded"` without executing native calls, and the new target replaces it.
+- Once the in-flight request finishes, the latest pending target is dispatched to the native host.
 - Explicit `set_mute` operations bypass the volume queue and execute independently.
 
 ---
@@ -118,7 +129,7 @@ Sets the mute status for a specific audio session by exact session ID.
    - Confirm in Windows Volume Mixer that Spotify's app volume changes to 50% without affecting system master volume or other apps.
 4. **Rapid Dial Adjustment Test:**
    - Rapidly send multiple volume updates (e.g. 10%, 20%, 30%, 40%, 50%) for a single session ID.
-   - Confirm only the active request and the final target request are dispatched to the native host, resulting in smooth volume changes.
+   - Confirm the first in-flight request returns `status: "ok"`, intermediate requests return `status: "superseded"`, and the final target request returns `status: "ok"`, keeping total native calls bounded to 2.
 5. **Closed / Missing Application Handling:**
    - Close an application (e.g., Discord).
    - Send `audio.sessions.set_volume` targeting the old session ID.

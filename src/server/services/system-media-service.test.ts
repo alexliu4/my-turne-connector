@@ -257,7 +257,7 @@ describe("SystemMediaService - Audio Output Discovery & Switching", () => {
     expect(await service.setAudioSessionVolume("missing", 50)).toEqual({ status: "invalid_session" });
   });
 
-  test("100+ rapid setAudioSessionVolume updates coalesce cleanly with bounded state and final value winning", async () => {
+  test("150+ rapid setAudioSessionVolume updates coalesce cleanly with intermediate supersession and final value winning", async () => {
     const host = new FakeHostBridge();
     const service = new SystemMediaService(host, new RecordingSink());
 
@@ -285,9 +285,11 @@ describe("SystemMediaService - Audio Output Discovery & Switching", () => {
 
     const results = await Promise.all(promises);
     expect(results).toHaveLength(150);
-    for (const res of results) {
-      expect(res.status).toBe("ok");
+    expect(results[0].status).toBe("ok");
+    for (let i = 1; i < 149; i++) {
+      expect(results[i].status).toBe("superseded");
     }
+    expect(results[149].status).toBe("ok");
 
     expect(callCount).toBe(2);
 

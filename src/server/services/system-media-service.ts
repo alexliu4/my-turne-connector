@@ -514,14 +514,7 @@ export class SystemMediaService {
     };
 
     if (state.pendingResolver) {
-      const oldResolve = state.pendingResolver;
-      const promise = new Promise<SetAudioSessionVolumeResponse>((resolve) => {
-        state!.pendingResolver = (res) => {
-          oldResolve(res);
-          resolve(res);
-        };
-      });
-      return promise;
+      state.pendingResolver({ status: "superseded" });
     }
 
     let resolveFn: ((res: SetAudioSessionVolumeResponse) => void) | undefined;
