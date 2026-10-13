@@ -16,6 +16,11 @@ import { createDeviceRoutes } from "./routes/device";
 import { createAnalyticsRoutes } from "./routes/analytics";
 import { createOtaRoutes } from "./routes/ota";
 import { createMediaRoutes } from "./routes/media";
+import { createConfigRoutes } from "./routes/config";
+import { createDiagnosticsRoutes } from "./routes/diagnostics";
+import { DiagnosticsService } from "./services/diagnostics-service";
+import { FileSystemAppLaunchPreferenceStore } from "./services/app-launch-config";
+import { FileSystemMacroPreferenceStore } from "./services/macro-config";
 import { existsSync } from "fs";
 import { createPlatformComposition } from "./platform";
 import { fileURLToPath } from "url";
@@ -93,6 +98,10 @@ async function main() {
   manager.setWSBroadcast(broadcast);
   await manager.initializeOffline();
 
+  const diagnosticsService = new DiagnosticsService(manager);
+  const appLaunchStore = new FileSystemAppLaunchPreferenceStore();
+  const macroStore = new FileSystemMacroPreferenceStore();
+
   const app = new Elysia()
     .use(cors())
     .use(createInfoRoutes())
@@ -105,6 +114,8 @@ async function main() {
     .use(createAnalyticsRoutes(manager.analyticsService))
     .use(createMediaRoutes(manager.systemMediaService))
     .use(createOtaRoutes(manager.otaService))
+    .use(createConfigRoutes(appLaunchStore, macroStore))
+    .use(createDiagnosticsRoutes(diagnosticsService))
     .ws("/ws", {
       open(ws) {
         ws.subscribe(WS_TOPIC);

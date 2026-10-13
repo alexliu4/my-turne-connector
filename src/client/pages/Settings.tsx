@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { get, post } from "../api";
+import { get, post, del } from "../api";
 import { useEvent } from "../hooks/useWebSocket";
 import { useAuth } from "../hooks/useAuth";
 import { Card, CardContent } from "@/components/ui/card";
@@ -8,7 +8,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
 import { Progress } from "@/components/ui/progress";
-import { LogOut, Trash2, RotateCw, ExternalLink, RefreshCw, Download } from "lucide-react";
+import { LogOut, Trash2, RotateCw, ExternalLink, RefreshCw, Download, Plus, Edit2, FileText } from "lucide-react";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -63,6 +63,37 @@ interface SystemMediaStatus {
   enabled: boolean;
   forced: boolean;
   active: boolean;
+}
+
+interface AppDefinition {
+  id: string;
+  name: string;
+  target: string;
+  fallbacks?: string[];
+  enabled?: boolean;
+}
+
+interface MacroDefinition {
+  id: string;
+  name: string;
+  action: {
+    type: string;
+    [key: string]: any;
+  };
+  enabled?: boolean;
+}
+
+interface DiagnosticsReport {
+  timestamp: string;
+  version: string;
+  platform: string;
+  connectorPlatform: string | null;
+  sidecarReadiness: boolean;
+  hostBridgeConnected: boolean;
+  carThingConnected: boolean;
+  carThingDevices: Array<{ id: string; deviceInfo: any }>;
+  hostStatus: any;
+  recentLogs: string[];
 }
 
 function formatBytes(bytes: number | null | undefined): string {
@@ -122,9 +153,36 @@ export function Settings() {
   const [otaBusy, setOtaBusy] = useState<"check" | "start" | null>(null);
   const [otaError, setOtaError] = useState<string | null>(null);
 
+  // App & Macro Config state
+  const [apps, setApps] = useState<AppDefinition[]>([]);
+  const [macros, setMacros] = useState<MacroDefinition[]>([]);
+  const [editingApp, setEditingApp] = useState<Partial<AppDefinition> | null>(null);
+  const [editingMacro, setEditingMacro] = useState<Partial<MacroDefinition> | null>(null);
+  const [configError, setConfigError] = useState<string | null>(null);
+
+  // Diagnostics state
+  const [diagnostics, setDiagnostics] = useState<DiagnosticsReport | null>(null);
+
+  const fetchConfig = useCallback(() => {
+    get<{ apps: AppDefinition[] }>("/api/config/apps")
+      .then((res) => setApps(res.apps || []))
+      .catch(() => {});
+    get<{ macros: MacroDefinition[] }>("/api/config/macros")
+      .then((res) => setMacros(res.macros || []))
+      .catch(() => {});
+  }, []);
+
+  const fetchDiagnostics = useCallback(() => {
+    get<{ diagnostics: DiagnosticsReport }>("/api/diagnostics/status")
+      .then((res) => setDiagnostics(res.diagnostics))
+      .catch(() => {});
+  }, []);
+
   useEffect(() => {
     get("/api/info").then(setInfo).catch(() => { });
-  }, []);
+    fetchConfig();
+    fetchDiagnostics();
+  }, [fetchConfig, fetchDiagnostics]);
 
   useEffect(() => {
     get<{ enabled: boolean }>("/api/analytics/status")
@@ -242,6 +300,76 @@ export function Settings() {
     }
   };
 
+  const handleSaveApp = async () => {
+    if (!editingApp || !editingApp.id || !editingApp.name || !editingApp.target) {
+      setConfigError("ID, Name, and Target are required for applications.");
+      return;
+    }
+    setConfigError(null);
+    try {
+      await post("/api/config/apps", editingApp);
+      setEditingApp(null);
+      fetchConfig();
+    } catch (err: any) {
+      setConfigError(errorMessage(err));
+    }
+  };
+
+  const handleDeleteApp = async (id: string) => {
+    try {
+      await del(`/api/config/apps/${id}`);
+      fetchConfig();
+    } catch (err: any) {
+      setConfigError(errorMessage(err));
+    }
+  };
+
+  const handleToggleAppEnabled = async (appDef: AppDefinition, enabled: boolean) => {
+    try {
+      await post("/api/config/apps", { ...appDef, enabled });
+      fetchConfig();
+    } catch (err: any) {
+      setConfigError(errorMessage(err));
+    }
+  };
+
+  const handleSaveMacro = async () => {
+    if (!editingMacro || !editingMacro.id || !editingMacro.name || !editingMacro.action?.type) {
+      setConfigError("ID, Name, and Action Type are required for macros.");
+      return;
+    }
+    setConfigError(null);
+    try {
+      await post("/api/config/macros", editingMacro);
+      setEditingMacro(null);
+      fetchConfig();
+    } catch (err: any) {
+      setConfigError(errorMessage(err));
+    }
+  };
+
+  const handleDeleteMacro = async (id: string) => {
+    try {
+      await del(`/api/config/macros/${id}`);
+      fetchConfig();
+    } catch (err: any) {
+      setConfigError(errorMessage(err));
+    }
+  };
+
+  const handleToggleMacroEnabled = async (macroDef: MacroDefinition, enabled: boolean) => {
+    try {
+      await post("/api/config/macros", { ...macroDef, enabled });
+      fetchConfig();
+    } catch (err: any) {
+      setConfigError(errorMessage(err));
+    }
+  };
+
+  const handleExportDiagnostics = () => {
+    window.open("/api/diagnostics/export", "_blank");
+  };
+
   const progressValue = otaStatus?.percent ?? 0;
   const showProgress =
     otaStatus?.inProgress &&
@@ -296,14 +424,47 @@ export function Settings() {
 
         <section>
           <h3 className="mb-4 text-xs font-medium uppercase tracking-widest text-muted">
-            System
+            System Diagnostics
           </h3>
           <Card>
-            <CardContent>
+            <CardContent className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <p className="font-medium text-fg">Connection Status</p>
+                  <p className="text-sm text-secondary">Read-only connection & route diagnostics</p>
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button variant="outline" size="sm" onClick={fetchDiagnostics}>
+                    <RefreshCw className="size-3.5" />
+                    Refresh
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleExportDiagnostics}>
+                    <FileText className="size-3.5" />
+                    Export Support Bundle
+                  </Button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="flex items-center justify-between rounded-lg bg-bg px-3 py-2.5">
+                  <span className="text-sm text-secondary">Native Host Bridge</span>
+                  <Badge variant={diagnostics?.hostBridgeConnected ? "success" : "secondary"}>
+                    {diagnostics?.hostBridgeConnected ? "Connected" : "Not Detected"}
+                  </Badge>
+                </div>
+                <div className="flex items-center justify-between rounded-lg bg-bg px-3 py-2.5">
+                  <span className="text-sm text-secondary">Car Thing Connection</span>
+                  <Badge variant={diagnostics?.carThingConnected ? "success" : "secondary"}>
+                    {diagnostics?.carThingConnected ? "Connected" : "Disconnected"}
+                  </Badge>
+                </div>
+              </div>
+
               <div className="space-y-3">
                 {[
-                  ["Connector Version", info?.version ?? "Unknown"],
-                  ["OS Version", info?.osVersion ?? "Unknown"],
+                  ["Connector Version", diagnostics?.version ?? info?.version ?? "Unknown"],
+                  ["Platform", diagnostics?.connectorPlatform ?? diagnostics?.platform ?? "Unknown"],
+                  ["Connected Devices", `${diagnostics?.carThingDevices?.length ?? 0} device(s)`],
                 ].map(([label, value]) => (
                   <div key={label} className="flex items-center justify-between rounded-lg bg-bg px-3 py-2.5">
                     <span className="text-sm text-secondary">{label}</span>
@@ -314,6 +475,235 @@ export function Settings() {
             </CardContent>
           </Card>
         </section>
+
+        {isWindows && (
+          <section>
+            <h3 className="mb-4 text-xs font-medium uppercase tracking-widest text-muted">
+              Configured Applications
+            </h3>
+            <Card>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-medium text-fg">App Launch Allowlist</p>
+                    <p className="text-sm text-secondary">Configure launch targets authorized for Car Thing execution</p>
+                  </div>
+                  <Button size="sm" onClick={() => setEditingApp({ id: "", name: "", target: "", enabled: true })}>
+                    <Plus className="size-3.5" />
+                    Add App
+                  </Button>
+                </div>
+
+                {configError && (
+                  <Alert variant="destructive">
+                    <AlertDescription>{configError}</AlertDescription>
+                  </Alert>
+                )}
+
+                <div className="space-y-2">
+                  {apps.map((app) => (
+                    <div key={app.id} className="flex items-center justify-between rounded-lg bg-bg p-3">
+                      <div className="min-w-0 pr-2">
+                        <p className="font-medium text-fg">{app.name} <span className="text-xs text-muted">({app.id})</span></p>
+                        <p className="truncate text-xs text-secondary">{app.target}</p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Switch
+                          checked={app.enabled !== false}
+                          onCheckedChange={(checked) => handleToggleAppEnabled(app, checked)}
+                          aria-label={`Toggle ${app.name}`}
+                        />
+                        <Button variant="ghost" size="sm" onClick={() => setEditingApp(app)}>
+                          <Edit2 className="size-3.5" />
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => handleDeleteApp(app.id)}>
+                          <Trash2 className="size-3.5 text-destructive" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                  {apps.length === 0 && (
+                    <p className="text-sm text-secondary py-2">No applications configured.</p>
+                  )}
+                </div>
+
+                {editingApp && (
+                  <div className="border-t border-line pt-4 space-y-3">
+                    <p className="font-medium text-sm text-fg">{editingApp.id ? "Edit App" : "Add App"}</p>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <input
+                        type="text"
+                        placeholder="App ID (e.g. vscode)"
+                        value={editingApp.id || ""}
+                        disabled={Boolean(editingApp.id && apps.some(a => a.id === editingApp.id))}
+                        onChange={(e) => setEditingApp({ ...editingApp, id: e.target.value })}
+                        className="rounded-md border border-line bg-bg px-3 py-1.5 text-sm"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Display Name"
+                        value={editingApp.name || ""}
+                        onChange={(e) => setEditingApp({ ...editingApp, name: e.target.value })}
+                        className="rounded-md border border-line bg-bg px-3 py-1.5 text-sm"
+                      />
+                    </div>
+                    <input
+                      type="text"
+                      placeholder="Target Path or Protocol (e.g. calc.exe, vscode://)"
+                      value={editingApp.target || ""}
+                      onChange={(e) => setEditingApp({ ...editingApp, target: e.target.value })}
+                      className="w-full rounded-md border border-line bg-bg px-3 py-1.5 text-sm"
+                    />
+                    <div className="flex justify-end gap-2">
+                      <Button variant="outline" size="sm" onClick={() => setEditingApp(null)}>
+                        Cancel
+                      </Button>
+                      <Button size="sm" onClick={handleSaveApp}>
+                        Save App
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </section>
+        )}
+
+        {isWindows && (
+          <section>
+            <h3 className="mb-4 text-xs font-medium uppercase tracking-widest text-muted">
+              Configured Macros
+            </h3>
+            <Card>
+              <CardContent className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <p className="font-medium text-fg">Macro Definitions</p>
+                    <p className="text-sm text-secondary">Configure authorized shortcut and macro routines</p>
+                  </div>
+                  <Button size="sm" onClick={() => setEditingMacro({ id: "", name: "", action: { type: "media", control: "toggle" }, enabled: true })}>
+                    <Plus className="size-3.5" />
+                    Add Macro
+                  </Button>
+                </div>
+
+                <div className="space-y-2">
+                  {macros.map((m) => (
+                    <div key={m.id} className="flex items-center justify-between rounded-lg bg-bg p-3">
+                      <div className="min-w-0 pr-2">
+                        <p className="font-medium text-fg">{m.name} <span className="text-xs text-muted">({m.id})</span></p>
+                        <p className="truncate text-xs text-secondary">
+                          Type: {m.action.type} {m.action.appId ? `(${m.action.appId})` : m.action.control ? `(${m.action.control})` : m.action.url ? `(${m.action.url})` : m.action.shortcut ? `(${m.action.shortcut})` : ""}
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <Switch
+                          checked={m.enabled !== false}
+                          onCheckedChange={(checked) => handleToggleMacroEnabled(m, checked)}
+                          aria-label={`Toggle ${m.name}`}
+                        />
+                        <Button variant="ghost" size="sm" onClick={() => setEditingMacro(m)}>
+                          <Edit2 className="size-3.5" />
+                        </Button>
+                        <Button variant="ghost" size="sm" onClick={() => handleDeleteMacro(m.id)}>
+                          <Trash2 className="size-3.5 text-destructive" />
+                        </Button>
+                      </div>
+                    </div>
+                  ))}
+                  {macros.length === 0 && (
+                    <p className="text-sm text-secondary py-2">No macros configured.</p>
+                  )}
+                </div>
+
+                {editingMacro && (
+                  <div className="border-t border-line pt-4 space-y-3">
+                    <p className="font-medium text-sm text-fg">{editingMacro.id ? "Edit Macro" : "Add Macro"}</p>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <input
+                        type="text"
+                        placeholder="Macro ID (e.g. toggle_media)"
+                        value={editingMacro.id || ""}
+                        disabled={Boolean(editingMacro.id && macros.some(m => m.id === editingMacro.id))}
+                        onChange={(e) => setEditingMacro({ ...editingMacro, id: e.target.value })}
+                        className="rounded-md border border-line bg-bg px-3 py-1.5 text-sm"
+                      />
+                      <input
+                        type="text"
+                        placeholder="Display Name"
+                        value={editingMacro.name || ""}
+                        onChange={(e) => setEditingMacro({ ...editingMacro, name: e.target.value })}
+                        className="rounded-md border border-line bg-bg px-3 py-1.5 text-sm"
+                      />
+                    </div>
+                    <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                      <select
+                        value={editingMacro.action?.type || "media"}
+                        onChange={(e) => setEditingMacro({ ...editingMacro, action: { ...editingMacro.action, type: e.target.value } })}
+                        className="rounded-md border border-line bg-bg px-3 py-1.5 text-sm"
+                      >
+                        <option value="media">Media Control</option>
+                        <option value="app">App Launch</option>
+                        <option value="url">Open URL</option>
+                        <option value="shortcut">System Shortcut</option>
+                      </select>
+                      {editingMacro.action?.type === "app" && (
+                        <input
+                          type="text"
+                          placeholder="App ID (e.g. vscode)"
+                          value={editingMacro.action?.appId || ""}
+                          onChange={(e) => setEditingMacro({ ...editingMacro, action: { ...editingMacro.action, type: "app", appId: e.target.value } })}
+                          className="rounded-md border border-line bg-bg px-3 py-1.5 text-sm"
+                        />
+                      )}
+                      {editingMacro.action?.type === "media" && (
+                        <select
+                          value={editingMacro.action?.control || "toggle"}
+                          onChange={(e) => setEditingMacro({ ...editingMacro, action: { ...editingMacro.action, type: "media", control: e.target.value } })}
+                          className="rounded-md border border-line bg-bg px-3 py-1.5 text-sm"
+                        >
+                          <option value="toggle">Toggle Play/Pause</option>
+                          <option value="play">Play</option>
+                          <option value="pause">Pause</option>
+                          <option value="next">Next Track</option>
+                          <option value="previous">Previous Track</option>
+                          <option value="volume_up">Volume Up</option>
+                          <option value="volume_down">Volume Down</option>
+                        </select>
+                      )}
+                      {editingMacro.action?.type === "url" && (
+                        <input
+                          type="text"
+                          placeholder="URL (e.g. https://usenocturne.com/)"
+                          value={editingMacro.action?.url || ""}
+                          onChange={(e) => setEditingMacro({ ...editingMacro, action: { ...editingMacro.action, type: "url", url: e.target.value } })}
+                          className="rounded-md border border-line bg-bg px-3 py-1.5 text-sm"
+                        />
+                      )}
+                      {editingMacro.action?.type === "shortcut" && (
+                        <input
+                          type="text"
+                          placeholder="Shortcut identifier (e.g. media_next)"
+                          value={editingMacro.action?.shortcut || ""}
+                          onChange={(e) => setEditingMacro({ ...editingMacro, action: { ...editingMacro.action, type: "shortcut", shortcut: e.target.value } })}
+                          className="rounded-md border border-line bg-bg px-3 py-1.5 text-sm"
+                        />
+                      )}
+                    </div>
+                    <div className="flex justify-end gap-2">
+                      <Button variant="outline" size="sm" onClick={() => setEditingMacro(null)}>
+                        Cancel
+                      </Button>
+                      <Button size="sm" onClick={handleSaveMacro}>
+                        Save Macro
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </section>
+        )}
 
         {isWindows && <section>
           <h3 className="mb-4 text-xs font-medium uppercase tracking-widest text-muted">

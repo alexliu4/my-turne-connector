@@ -132,18 +132,22 @@ export class FileSystemMacroPreferenceStore implements MacroPreferenceStore {
   }
 }
 
-function validateMacroDefinition(fallbackKey: string, val: unknown): MacroDefinition | null {
+export function validateMacroDefinition(fallbackKey: string, val: unknown): MacroDefinition | null {
   if (!val || typeof val !== "object" || Array.isArray(val)) return null;
   const rec = val as Record<string, unknown>;
-  const id = typeof rec.id === "string" && rec.id.trim() ? rec.id.trim() : fallbackKey.trim();
-  const name = typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : id;
+  const rawId = typeof rec.id === "string" && rec.id.trim() ? rec.id.trim() : fallbackKey.trim();
+  const name = typeof rec.name === "string" && rec.name.trim() ? rec.name.trim() : rawId;
   const action = validateMacroAction(rec.action);
-  if (!id || !name || !action) return null;
+
+  if (!rawId || !name || !action) return null;
+
+  // Preserve existing configuration IDs while preventing control character injection
+  if (/[\x00-\x1F\x7F]/.test(rawId)) return null;
 
   if (rec.enabled !== undefined && typeof rec.enabled !== "boolean") return null;
   const enabled = rec.enabled ?? true;
 
-  return { id, name, action, enabled };
+  return { id: rawId, name, action, enabled };
 }
 
 function validateMacroAction(val: unknown): MacroActionConfig | null {
@@ -154,7 +158,7 @@ function validateMacroAction(val: unknown): MacroActionConfig | null {
 
   if (type === "app") {
     const appId = typeof rec.appId === "string" && rec.appId.trim() ? rec.appId.trim() : null;
-    return appId ? { type: "app", appId } : null;
+    return appId && !/[\x00-\x1F\x7F]/.test(appId) ? { type: "app", appId } : null;
   }
 
   if (type === "media") {
