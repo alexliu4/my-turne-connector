@@ -67,6 +67,7 @@ export interface SelectAudioOutputResponse {
 
 export interface AudioSession {
   id: string;
+  endpointId: string;
   appName: string;
   processId: number;
   volumePercent: number;
@@ -440,6 +441,7 @@ export class SystemMediaService {
         .filter((item): item is Record<string, unknown> => item !== null && typeof item.id === "string")
         .map((item) => ({
           id: item.id as string,
+          endpointId: typeof item.endpointId === "string" ? item.endpointId : (typeof item.endpoint_id === "string" ? item.endpoint_id : ""),
           appName: typeof item.appName === "string" ? item.appName : "Application",
           processId: typeof item.processId === "number" ? item.processId : 0,
           volumePercent: normalizeVolumePercent(item.volumePercent ?? item.volume_percent) ?? 100,
@@ -452,10 +454,12 @@ export class SystemMediaService {
     }
   }
 
+  private readonly activeSessionVolumeQueue = new Map<string, { latestVolume: number; deviceId?: string; inFlight: boolean; pendingVolume?: number; pendingDeviceId?: string; pendingPromise?: Promise<SetAudioSessionVolumeResponse>; resolveList: Array<(res: SetAudioSessionVolumeResponse) => void> }>();
+
   async setAudioSessionVolume(
     sessionId: string,
     volumePercent: number,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; deviceId?: string },
   ): Promise<SetAudioSessionVolumeResponse> {
     if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
       return { status: "invalid_session" };
@@ -464,24 +468,63 @@ export class SystemMediaService {
     if (normalizedPercent === null) {
       return { status: "invalid_volume" };
     }
+
+    const key = sessionId.trim();
+    let state = this.activeSessionVolumeQueue.get(key);
+    if (!state) {
+      state = { latestVolume: normalizedPercent, deviceId: options?.deviceId, inFlight: false, resolveList: [] };
+      this.activeSessionVolumeQueue.set(key, state);
+    } else {
+      state.latestVolume = normalizedPercent;
+      if (options?.deviceId) state.deviceId = options.deviceId;
+    }
+
+    return new Promise<SetAudioSessionVolumeResponse>((resolve) => {
+      state!.resolveList.push(resolve);
+      this.processSessionVolumeQueue(key, options?.timeoutMs);
+    });
+  }
+
+  private async processSessionVolumeQueue(sessionIdKey: string, timeoutMs?: number): Promise<void> {
+    const state = this.activeSessionVolumeQueue.get(sessionIdKey);
+    if (!state || state.inFlight) return;
+
+    state.inFlight = true;
+    const targetVolume = state.latestVolume;
+    const targetDeviceId = state.deviceId;
+    const resolversToNotify = [...state.resolveList];
+    state.resolveList = [];
+
+    let result: SetAudioSessionVolumeResponse = { status: "unsupported" };
     try {
-      const params = { sessionId: sessionId.trim(), volumePercent: normalizedPercent };
-      const callOptions = { timeoutMs: options?.timeoutMs ?? 3000 };
+      const params: Record<string, unknown> = { sessionId: sessionIdKey, volumePercent: targetVolume };
+      if (typeof targetDeviceId === "string" && targetDeviceId.trim().length > 0) {
+        params.deviceId = targetDeviceId.trim();
+      }
+      const callOptions = { timeoutMs: timeoutMs ?? 3000 };
       const response = await this.hostBridge.call<unknown>("audio.sessions.set_volume", params, callOptions);
       const rec = asRecord(response);
       const status = (rec?.status as string) ?? "unsupported";
       const confirmedVolumePercent = normalizeVolumePercent(rec?.confirmedVolumePercent ?? rec?.confirmed_volume_percent) ?? undefined;
-      return { status, confirmedVolumePercent };
+      result = { status, confirmedVolumePercent };
     } catch (error) {
       log.warn(`Set audio session volume failed: ${errorMessage(error)}`);
-      return { status: "unsupported" };
+      result = { status: "unsupported" };
+    } finally {
+      state.inFlight = false;
+      for (const res of resolversToNotify) res(result);
+      if (state.resolveList.length > 0) {
+        this.processSessionVolumeQueue(sessionIdKey, timeoutMs);
+      } else {
+        this.activeSessionVolumeQueue.delete(sessionIdKey);
+      }
     }
   }
 
   async setAudioSessionMute(
     sessionId: string,
     muted: boolean,
-    options?: { timeoutMs?: number },
+    options?: { timeoutMs?: number; deviceId?: string },
   ): Promise<SetAudioSessionMuteResponse> {
     if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
       return { status: "invalid_session" };
@@ -490,7 +533,10 @@ export class SystemMediaService {
       return { status: "unsupported" };
     }
     try {
-      const params = { sessionId: sessionId.trim(), muted };
+      const params: Record<string, unknown> = { sessionId: sessionId.trim(), muted };
+      if (typeof options?.deviceId === "string" && options.deviceId.trim().length > 0) {
+        params.deviceId = options.deviceId.trim();
+      }
       const callOptions = { timeoutMs: options?.timeoutMs ?? 3000 };
       const response = await this.hostBridge.call<unknown>("audio.sessions.set_mute", params, callOptions);
       const rec = asRecord(response);

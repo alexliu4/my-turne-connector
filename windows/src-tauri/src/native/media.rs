@@ -26,7 +26,7 @@ use windows::Win32::Media::Audio::{
     IMMNotificationClient_Impl, MMDeviceEnumerator, DEVICE_STATE_ACTIVE,
 };
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, STGM_READ, CLSCTX_ALL, COINIT_MULTITHREADED,
+    CoCreateInstance, CoInitializeEx, CoTaskMemFree, STGM_READ, CLSCTX_ALL, COINIT_MULTITHREADED,
 };
 use windows::Win32::UI::Shell::PropertiesSystem::IPropertyStore;
 
@@ -719,7 +719,8 @@ impl WindowsMediaState {
                     Some(v) if v <= 100 => v as u8,
                     _ => return Ok(json!({ "status": "invalid_volume" })),
                 };
-                Ok(set_audio_session_volume(session_id, volume_percent))
+                let device_id = params.get("deviceId").or_else(|| params.get("device_id")).and_then(Value::as_str);
+                Ok(set_audio_session_volume(session_id, volume_percent, device_id))
             }
             "audio.sessions.set_mute" | "media.set_audio_session_mute" => {
                 let session_id = match params.get("sessionId").or_else(|| params.get("session_id")).and_then(Value::as_str) {
@@ -730,7 +731,8 @@ impl WindowsMediaState {
                     Some(m) => m,
                     None => return Ok(json!({ "status": "unsupported" })),
                 };
-                Ok(set_audio_session_mute(session_id, muted))
+                let device_id = params.get("deviceId").or_else(|| params.get("device_id")).and_then(Value::as_str);
+                Ok(set_audio_session_mute(session_id, muted, device_id))
             }
             "media.control" => self.control(bridge, params).await,
             _ => Err(format!("Unsupported native media method: {method}")),
@@ -1698,41 +1700,67 @@ mod tests {
     }
 }
 
-fn get_audio_sessions(device_id: Option<&str>) -> Value {
+fn resolve_audio_endpoint(enumerator: &IMMDeviceEnumerator, device_id: Option<&str>) -> Result<(IMMDevice, String), String> {
     unsafe {
-        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-        let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
-            Ok(e) => e,
-            Err(_) => return json!({ "status": "unsupported", "sessions": [] }),
-        };
-
-        let device: IMMDevice = if let Some(id) = device_id {
+        if let Some(id) = device_id {
             let utf16: Vec<u16> = id.encode_utf16().chain(std::iter::once(0)).collect();
-            match enumerator.GetDevice(windows_core::PCWSTR(utf16.as_ptr())) {
-                Ok(d) => d,
-                Err(_) => return json!({ "status": "invalid_device", "sessions": [] }),
-            }
+            let device = enumerator.GetDevice(windows_core::PCWSTR(utf16.as_ptr()))
+                .map_err(|_| "invalid_device".to_string())?;
+            let id_str = match device.GetId() {
+                Ok(pwstr) => {
+                    let s = pwstr.to_string().unwrap_or_else(|_| id.to_string());
+                    CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+                    s
+                }
+                Err(_) => id.to_string(),
+            };
+            Ok((device, id_str))
         } else {
-            match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-                Ok(d) => d,
-                Err(_) => return json!({ "status": "unsupported", "sessions": [] }),
-            }
-        };
+            let device = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)
+                .map_err(|_| "unsupported".to_string())?;
+            let id_str = match device.GetId() {
+                Ok(pwstr) => {
+                    let s = pwstr.to_string().unwrap_or_default();
+                    CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+                    s
+                }
+                Err(_) => String::new(),
+            };
+            Ok((device, id_str))
+        }
+    }
+}
 
-        let manager: IAudioSessionManager2 = match device.Activate(CLSCTX_ALL, None) {
-            Ok(m) => m,
-            Err(_) => return json!({ "status": "unsupported", "sessions": [] }),
-        };
+fn compute_session_id(endpoint_id: &str, instance_id: &str) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
-        let session_enum: IAudioSessionEnumerator = match manager.GetSessionEnumerator() {
-            Ok(e) => e,
-            Err(_) => return json!({ "status": "unsupported", "sessions": [] }),
-        };
+    let mut hasher = DefaultHasher::new();
+    endpoint_id.hash(&mut hasher);
+    instance_id.hash(&mut hasher);
+    let hash = hasher.finish();
 
-        let count = match session_enum.GetCount() {
-            Ok(c) => c,
-            Err(_) => return json!({ "status": "unsupported", "sessions": [] }),
-        };
+    format!("{:016x}", hash)
+}
+
+struct DiscoveredSession {
+    opaque_id: String,
+    endpoint_id: String,
+    app_name: String,
+    process_id: u32,
+    volume_percent: u8,
+    muted: bool,
+    simple_vol: ISimpleAudioVolume,
+}
+
+fn enumerate_endpoint_sessions(device: &IMMDevice, endpoint_id: &str) -> Result<Vec<DiscoveredSession>, String> {
+    unsafe {
+        let manager: IAudioSessionManager2 = device.Activate(CLSCTX_ALL, None)
+            .map_err(|_| "unsupported".to_string())?;
+        let session_enum: IAudioSessionEnumerator = manager.GetSessionEnumerator()
+            .map_err(|_| "unsupported".to_string())?;
+        let count = session_enum.GetCount()
+            .map_err(|_| "unsupported".to_string())?;
 
         let mut sessions = Vec::new();
 
@@ -1747,11 +1775,25 @@ fn get_audio_sessions(device_id: Option<&str>) -> Value {
                 Err(_) => continue,
             };
 
+            let instance_id = match control2.GetSessionInstanceIdentifier() {
+                Ok(pwstr) => {
+                    let s = pwstr.to_string().unwrap_or_default();
+                    CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+                    s
+                }
+                Err(_) => continue,
+            };
+
+            if instance_id.is_empty() {
+                continue;
+            }
+
             let process_id = control2.GetProcessId().unwrap_or(0);
 
             let mut app_name = String::new();
             if let Ok(display_pwstr) = control2.GetDisplayName() {
                 let name = display_pwstr.to_string().unwrap_or_default();
+                CoTaskMemFree(Some(display_pwstr.as_ptr() as *const _));
                 if !name.trim().is_empty() {
                     app_name = name;
                 }
@@ -1760,8 +1802,14 @@ fn get_audio_sessions(device_id: Option<&str>) -> Value {
             if app_name.is_empty() && process_id != 0 {
                 if let Ok(proc_pwstr) = control2.GetSessionIdentifier() {
                     let ident = proc_pwstr.to_string().unwrap_or_default();
+                    CoTaskMemFree(Some(proc_pwstr.as_ptr() as *const _));
                     if let Some(pos) = ident.rfind('\\') {
-                        app_name = ident[pos + 1..].to_string();
+                        let filename = &ident[pos + 1..];
+                        if let Some(exe_pos) = filename.rfind("%") {
+                            app_name = filename[..exe_pos].to_string();
+                        } else {
+                            app_name = filename.to_string();
+                        }
                     } else if !ident.trim().is_empty() {
                         app_name = ident;
                     }
@@ -1785,16 +1833,51 @@ fn get_audio_sessions(device_id: Option<&str>) -> Value {
             let volume_percent = (vol_float * 100.0).round() as u8;
             let muted = simple_vol.GetMute().map(|m| m.as_bool()).unwrap_or(false);
 
-            let session_id = format!("{process_id}:{app_name}");
+            let opaque_id = compute_session_id(endpoint_id, &instance_id);
 
-            sessions.push(json!({
-                "id": session_id,
-                "appName": app_name,
-                "processId": process_id,
-                "volumePercent": volume_percent,
-                "muted": muted
-            }));
+            sessions.push(DiscoveredSession {
+                opaque_id,
+                endpoint_id: endpoint_id.to_string(),
+                app_name,
+                process_id,
+                volume_percent,
+                muted,
+                simple_vol,
+            });
         }
+
+        Ok(sessions)
+    }
+}
+
+fn get_audio_sessions(device_id: Option<&str>) -> Value {
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
+            Ok(e) => e,
+            Err(_) => return json!({ "status": "unsupported", "sessions": [] }),
+        };
+
+        let (device, endpoint_id) = match resolve_audio_endpoint(&enumerator, device_id) {
+            Ok(res) => res,
+            Err(status) => return json!({ "status": status, "sessions": [] }),
+        };
+
+        let discovered = match enumerate_endpoint_sessions(&device, &endpoint_id) {
+            Ok(s) => s,
+            Err(status) => return json!({ "status": status, "sessions": [] }),
+        };
+
+        let sessions: Vec<Value> = discovered.into_iter().map(|s| {
+            json!({
+                "id": s.opaque_id,
+                "endpointId": s.endpoint_id,
+                "appName": s.app_name,
+                "processId": s.process_id,
+                "volumePercent": s.volume_percent,
+                "muted": s.muted
+            })
+        }).collect();
 
         json!({
             "status": "ok",
@@ -1803,7 +1886,7 @@ fn get_audio_sessions(device_id: Option<&str>) -> Value {
     }
 }
 
-fn set_audio_session_volume(session_id: &str, volume_percent: u8) -> Value {
+fn set_audio_session_volume(session_id: &str, volume_percent: u8, device_id: Option<&str>) -> Value {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
@@ -1811,95 +1894,45 @@ fn set_audio_session_volume(session_id: &str, volume_percent: u8) -> Value {
             Err(_) => return json!({ "status": "unsupported" }),
         };
 
-        let device: IMMDevice = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-            Ok(d) => d,
-            Err(_) => return json!({ "status": "unsupported" }),
+        let (device, endpoint_id) = match resolve_audio_endpoint(&enumerator, device_id) {
+            Ok(res) => res,
+            Err(status) => return json!({ "status": status }),
         };
 
-        let manager: IAudioSessionManager2 = match device.Activate(CLSCTX_ALL, None) {
-            Ok(m) => m,
-            Err(_) => return json!({ "status": "unsupported" }),
+        let sessions = match enumerate_endpoint_sessions(&device, &endpoint_id) {
+            Ok(s) => s,
+            Err(status) => return json!({ "status": status }),
         };
 
-        let session_enum: IAudioSessionEnumerator = match manager.GetSessionEnumerator() {
-            Ok(e) => e,
-            Err(_) => return json!({ "status": "unsupported" }),
+        let matching_session = match sessions.into_iter().find(|s| s.opaque_id == session_id) {
+            Some(s) => s,
+            None => return json!({ "status": "invalid_session" }),
         };
 
-        let count = match session_enum.GetCount() {
-            Ok(c) => c,
-            Err(_) => return json!({ "status": "unsupported" }),
-        };
-
-        let vol_float = (volume_percent as f32) / 100.0;
-        let mut target_found = false;
-
-        for i in 0..count {
-            let control: IAudioSessionControl = match session_enum.GetSession(i) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            let control2: IAudioSessionControl2 = match control.cast() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            let process_id = control2.GetProcessId().unwrap_or(0);
-
-            let mut app_name = String::new();
-            if let Ok(display_pwstr) = control2.GetDisplayName() {
-                let name = display_pwstr.to_string().unwrap_or_default();
-                if !name.trim().is_empty() {
-                    app_name = name;
-                }
-            }
-
-            if app_name.is_empty() && process_id != 0 {
-                if let Ok(proc_pwstr) = control2.GetSessionIdentifier() {
-                    let ident = proc_pwstr.to_string().unwrap_or_default();
-                    if let Some(pos) = ident.rfind('\\') {
-                        app_name = ident[pos + 1..].to_string();
-                    } else if !ident.trim().is_empty() {
-                        app_name = ident;
-                    }
-                }
-            }
-
-            if app_name.is_empty() {
-                if process_id != 0 {
-                    app_name = format!("Process {process_id}");
-                } else {
-                    app_name = "System Audio".to_string();
-                }
-            }
-
-            let curr_id = format!("{process_id}:{app_name}");
-
-            if curr_id == session_id || (session_id.contains(':') && session_id.starts_with(&format!("{process_id}:"))) {
-                let simple_vol: ISimpleAudioVolume = match control.cast() {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                if simple_vol.SetMasterVolume(vol_float, std::ptr::null()).is_ok() {
-                    target_found = true;
-                }
-            }
+        let target_vol_float = (volume_percent as f32) / 100.0;
+        if matching_session.simple_vol.SetMasterVolume(target_vol_float, std::ptr::null()).is_err() {
+            return json!({ "status": "failed" });
         }
 
-        if target_found {
-            json!({
-                "status": "ok",
-                "confirmedVolumePercent": volume_percent
-            })
-        } else {
-            json!({ "status": "invalid_session" })
+        let verified_vol_float = match matching_session.simple_vol.GetMasterVolume() {
+            Ok(v) => v,
+            Err(_) => return json!({ "status": "failed" }),
+        };
+
+        let confirmed_percent = (verified_vol_float * 100.0).round() as u8;
+
+        if (confirmed_percent as i16 - volume_percent as i16).abs() > 2 {
+            return json!({ "status": "failed", "confirmedVolumePercent": confirmed_percent });
         }
+
+        json!({
+            "status": "ok",
+            "confirmedVolumePercent": confirmed_percent
+        })
     }
 }
 
-fn set_audio_session_mute(session_id: &str, muted: bool) -> Value {
+fn set_audio_session_mute(session_id: &str, muted: bool, device_id: Option<&str>) -> Value {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         let enumerator: IMMDeviceEnumerator = match CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) {
@@ -1907,89 +1940,37 @@ fn set_audio_session_mute(session_id: &str, muted: bool) -> Value {
             Err(_) => return json!({ "status": "unsupported" }),
         };
 
-        let device: IMMDevice = match enumerator.GetDefaultAudioEndpoint(eRender, eConsole) {
-            Ok(d) => d,
-            Err(_) => return json!({ "status": "unsupported" }),
+        let (device, endpoint_id) = match resolve_audio_endpoint(&enumerator, device_id) {
+            Ok(res) => res,
+            Err(status) => return json!({ "status": status }),
         };
 
-        let manager: IAudioSessionManager2 = match device.Activate(CLSCTX_ALL, None) {
-            Ok(m) => m,
-            Err(_) => return json!({ "status": "unsupported" }),
+        let sessions = match enumerate_endpoint_sessions(&device, &endpoint_id) {
+            Ok(s) => s,
+            Err(status) => return json!({ "status": status }),
         };
 
-        let session_enum: IAudioSessionEnumerator = match manager.GetSessionEnumerator() {
-            Ok(e) => e,
-            Err(_) => return json!({ "status": "unsupported" }),
+        let matching_session = match sessions.into_iter().find(|s| s.opaque_id == session_id) {
+            Some(s) => s,
+            None => return json!({ "status": "invalid_session" }),
         };
 
-        let count = match session_enum.GetCount() {
-            Ok(c) => c,
-            Err(_) => return json!({ "status": "unsupported" }),
-        };
-
-        let mut target_found = false;
-
-        for i in 0..count {
-            let control: IAudioSessionControl = match session_enum.GetSession(i) {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
-
-            let control2: IAudioSessionControl2 = match control.cast() {
-                Ok(c) => c,
-                Err(_) => continue,
-            };
-
-            let process_id = control2.GetProcessId().unwrap_or(0);
-
-            let mut app_name = String::new();
-            if let Ok(display_pwstr) = control2.GetDisplayName() {
-                let name = display_pwstr.to_string().unwrap_or_default();
-                if !name.trim().is_empty() {
-                    app_name = name;
-                }
-            }
-
-            if app_name.is_empty() && process_id != 0 {
-                if let Ok(proc_pwstr) = control2.GetSessionIdentifier() {
-                    let ident = proc_pwstr.to_string().unwrap_or_default();
-                    if let Some(pos) = ident.rfind('\\') {
-                        app_name = ident[pos + 1..].to_string();
-                    } else if !ident.trim().is_empty() {
-                        app_name = ident;
-                    }
-                }
-            }
-
-            if app_name.is_empty() {
-                if process_id != 0 {
-                    app_name = format!("Process {process_id}");
-                } else {
-                    app_name = "System Audio".to_string();
-                }
-            }
-
-            let curr_id = format!("{process_id}:{app_name}");
-
-            if curr_id == session_id || (session_id.contains(':') && session_id.starts_with(&format!("{process_id}:"))) {
-                let simple_vol: ISimpleAudioVolume = match control.cast() {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-
-                if simple_vol.SetMute(muted, std::ptr::null()).is_ok() {
-                    target_found = true;
-                }
-            }
+        if matching_session.simple_vol.SetMute(muted, std::ptr::null()).is_err() {
+            return json!({ "status": "failed" });
         }
 
-        if target_found {
-            json!({
-                "status": "ok",
-                "confirmedMuted": muted
-            })
-        } else {
-            json!({ "status": "invalid_session" })
+        let verified_muted = match matching_session.simple_vol.GetMute() {
+            Ok(m) => m.as_bool(),
+            Err(_) => return json!({ "status": "failed" }),
+        };
+
+        if verified_muted != muted {
+            return json!({ "status": "failed", "confirmedMuted": verified_muted });
         }
+
+        json!({
+            "status": "ok",
+            "confirmedMuted": verified_muted
+        })
     }
 }

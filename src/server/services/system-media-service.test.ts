@@ -52,18 +52,28 @@ class FakeHostBridge implements HostBridgeClient {
   audioSessionsStatus = "ok";
   audioSessions = [
     {
-      id: "1234:Spotify",
+      id: "abc123hash",
+      endpointId: "device-1",
       appName: "Spotify",
       processId: 1234,
       volumePercent: 80,
       muted: false,
     },
     {
-      id: "5678:Discord",
+      id: "def456hash",
+      endpointId: "device-1",
       appName: "Discord",
       processId: 5678,
       volumePercent: 60,
       muted: true,
+    },
+    {
+      id: "ghi789hash",
+      endpointId: "device-2",
+      appName: "Chrome",
+      processId: 1234,
+      volumePercent: 50,
+      muted: false,
     },
   ];
 
@@ -212,9 +222,10 @@ describe("SystemMediaService - Audio Output Discovery & Switching", () => {
 
     const result = await service.getAudioSessions();
     expect(result.status).toBe("ok");
-    expect(result.sessions).toHaveLength(2);
+    expect(result.sessions).toHaveLength(3);
     expect(result.sessions[0]).toEqual({
-      id: "1234:Spotify",
+      id: "abc123hash",
+      endpointId: "device-1",
       appName: "Spotify",
       processId: 1234,
       volumePercent: 80,
@@ -223,39 +234,77 @@ describe("SystemMediaService - Audio Output Discovery & Switching", () => {
     expect(host.calls.at(-1)).toEqual({ method: "audio.sessions.list", params: {} });
   });
 
-  test("setAudioSessionVolume updates session volume", async () => {
+  test("setAudioSessionVolume updates session volume with exact opaque ID and deviceId target", async () => {
     const host = new FakeHostBridge();
     const service = new SystemMediaService(host, new RecordingSink());
 
-    const result = await service.setAudioSessionVolume("1234:Spotify", 75);
+    const result = await service.setAudioSessionVolume("abc123hash", 75, { deviceId: "device-1" });
     expect(result.status).toBe("ok");
     expect(result.confirmedVolumePercent).toBe(75);
     expect(host.calls.at(-1)).toEqual({
       method: "audio.sessions.set_volume",
-      params: { sessionId: "1234:Spotify", volumePercent: 75 },
+      params: { sessionId: "abc123hash", volumePercent: 75, deviceId: "device-1" },
     });
   });
 
-  test("setAudioSessionVolume handles invalid session and invalid volume", async () => {
+  test("setAudioSessionVolume handles invalid session and invalid volume bounds", async () => {
     const host = new FakeHostBridge();
     const service = new SystemMediaService(host, new RecordingSink());
 
     expect(await service.setAudioSessionVolume("", 50)).toEqual({ status: "invalid_session" });
-    expect(await service.setAudioSessionVolume("1234:Spotify", -1)).toEqual({ status: "invalid_volume" });
-    expect(await service.setAudioSessionVolume("1234:Spotify", 101)).toEqual({ status: "invalid_volume" });
+    expect(await service.setAudioSessionVolume("abc123hash", -1)).toEqual({ status: "invalid_volume" });
+    expect(await service.setAudioSessionVolume("abc123hash", 101)).toEqual({ status: "invalid_volume" });
     expect(await service.setAudioSessionVolume("missing", 50)).toEqual({ status: "invalid_session" });
   });
 
-  test("setAudioSessionMute updates session mute status", async () => {
+  test("rapid setAudioSessionVolume updates coalesce with latest-value-wins strategy", async () => {
     const host = new FakeHostBridge();
     const service = new SystemMediaService(host, new RecordingSink());
 
-    const result = await service.setAudioSessionMute("1234:Spotify", true);
+    let resolveInFlight: ((val: unknown) => void) | null = null;
+    const origCall = host.call.bind(host);
+    let callCount = 0;
+    host.call = async (method: string, params: unknown) => {
+      if (method === "audio.sessions.set_volume") {
+        callCount++;
+        if (callCount === 1) {
+          await new Promise((r) => { resolveInFlight = r; });
+        }
+      }
+      return origCall(method, params);
+    };
+
+    const p1 = service.setAudioSessionVolume("abc123hash", 20);
+    const p2 = service.setAudioSessionVolume("abc123hash", 30);
+    const p3 = service.setAudioSessionVolume("abc123hash", 40);
+
+    expect(callCount).toBe(1);
+
+    resolveInFlight!({});
+
+    const [res1, res2, res3] = await Promise.all([p1, p2, p3]);
+    expect(res1.status).toBe("ok");
+    expect(res2.status).toBe("ok");
+    expect(res3.status).toBe("ok");
+
+    expect(callCount).toBe(2);
+
+    const volumeCalls = host.calls.filter((c) => c.method === "audio.sessions.set_volume");
+    expect(volumeCalls).toHaveLength(2);
+    expect((volumeCalls[0].params as { volumePercent: number }).volumePercent).toBe(20);
+    expect((volumeCalls[1].params as { volumePercent: number }).volumePercent).toBe(40);
+  });
+
+  test("setAudioSessionMute updates session mute status independently of volume queue", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.setAudioSessionMute("abc123hash", true, { deviceId: "device-1" });
     expect(result.status).toBe("ok");
     expect(result.confirmedMuted).toBeTrue();
     expect(host.calls.at(-1)).toEqual({
       method: "audio.sessions.set_mute",
-      params: { sessionId: "1234:Spotify", muted: true },
+      params: { sessionId: "abc123hash", muted: true, deviceId: "device-1" },
     });
   });
 

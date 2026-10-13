@@ -4,7 +4,7 @@
 
 ### 1. `audio.sessions.list` (or `media.get_audio_sessions`)
 
-Enumerates active Core Audio sessions on the specified render device (or default device if omitted).
+Enumerates active Core Audio sessions on the specified render device (or default console render endpoint if `deviceId` is omitted).
 
 #### Request Params
 - `deviceId` (string, optional): Opaque device GUID ID string returned by `audio.outputs.list`.
@@ -15,14 +15,16 @@ Enumerates active Core Audio sessions on the specified render device (or default
   "status": "ok",
   "sessions": [
     {
-      "id": "1234:Spotify",
+      "id": "a1b2c3d4e5f60718",
+      "endpointId": "{0.0.0.00000000}.{device-guid-1}",
       "appName": "Spotify",
       "processId": 1234,
       "volumePercent": 80,
       "muted": false
     },
     {
-      "id": "5678:Discord",
+      "id": "b2c3d4e5f6071829",
+      "endpointId": "{0.0.0.00000000}.{device-guid-1}",
       "appName": "Discord",
       "processId": 5678,
       "volumePercent": 60,
@@ -36,11 +38,12 @@ Enumerates active Core Audio sessions on the specified render device (or default
 
 ### 2. `audio.sessions.set_volume` (or `media.set_audio_session_volume`)
 
-Sets the master volume scalar for a specific audio session by session ID.
+Sets the master volume scalar for a specific audio session by exact session ID.
 
 #### Request Params
-- `sessionId` (string, required): Session ID returned by `audio.sessions.list` (e.g. `"1234:Spotify"`).
+- `sessionId` (string, required): Opaque 64-bit session ID returned by `audio.sessions.list` (e.g. `"a1b2c3d4e5f60718"`).
 - `volumePercent` / `level` (number, required): Integer percentage from 0 to 100.
+- `deviceId` (string, optional): Target device GUID string associated with the session.
 
 #### Response Payload (`SetAudioSessionVolumeResponse`)
 ```json
@@ -54,11 +57,12 @@ Sets the master volume scalar for a specific audio session by session ID.
 
 ### 3. `audio.sessions.set_mute` (or `media.set_audio_session_mute`)
 
-Sets the mute status for a specific audio session by session ID.
+Sets the mute status for a specific audio session by exact session ID.
 
 #### Request Params
-- `sessionId` (string, required): Session ID returned by `audio.sessions.list`.
+- `sessionId` (string, required): Opaque session ID returned by `audio.sessions.list`.
 - `muted` (boolean, required): `true` to mute, `false` to unmute.
+- `deviceId` (string, optional): Target device GUID string associated with the session.
 
 #### Response Payload (`SetAudioSessionMuteResponse`)
 ```json
@@ -69,18 +73,36 @@ Sets the mute status for a specific audio session by session ID.
 ```
 
 #### Status Values
-- `"ok"`: Successfully queried or modified audio session.
+- `"ok"`: Successfully queried, modified, and verified audio session volume/mute state.
 - `"invalid_session"`: Session ID is empty, missing, or inactive/disappeared.
-- `"invalid_volume"`: Volume percentage is out of range (not 0-100).
+- `"invalid_volume"`: Volume percentage is out of range (not 0-100) or non-finite.
+- `"failed"`: Native mutation or read-back confirmation failed.
 - `"unsupported"`: Core Audio session enumeration unavailable or host bridge error.
+
+---
+
+## Session Identity and Lifetime
+
+- **Opaque Session IDs:** Session IDs are 16-character hexadecimal hashes (`{:016x}`) computed deterministically from the endpoint ID and Windows Core Audio `IAudioSessionControl2::GetSessionInstanceIdentifier()`.
+- **Exact Session Matching:** Prefix, process ID, or fallback matching is strictly prohibited. Every mutation targets exactly one session instance.
+- **Lifetime & Invalidation:** Session IDs are session-scoped and endpoint-specific. When an application exits, restarts, or closes its audio stream, its old session ID is invalidated and will return `status: "invalid_session"`.
+
+---
+
+## Rapid Dial Movement & Coalescing Strategy
+
+- When rapid volume adjustments target the same session (e.g., dial turns on the Car Thing), `SystemMediaService` maintains an in-flight queue per session ID using a **latest-value-wins** strategy.
+- While a volume call is in-flight, intermediate dial updates update the queued target volume without triggering redundant RPC calls over Bluetooth or native bridge overhead.
+- Once the in-flight request finishes, the queued latest target is sent immediately.
+- Explicit `set_mute` operations bypass the volume queue and execute independently.
 
 ---
 
 ## Native Windows Implementation Details
 
 - **Session Enumeration:** Obtains `IAudioSessionManager2` from render `IMMDevice` and calls `GetSessionEnumerator()` to retrieve `IAudioSessionEnumerator`.
-- **Session Metadata:** Uses `IAudioSessionControl2` to query process ID (`GetProcessId`), display name (`GetDisplayName`), or session identifier (`GetSessionIdentifier`).
-- **Volume & Mute Controls:** Casts `IAudioSessionControl` to `ISimpleAudioVolume` to call `GetMasterVolume`, `SetMasterVolume`, `GetMute`, and `SetMute`.
+- **Session Metadata:** Uses `IAudioSessionControl2` to query process ID (`GetProcessId`), display name (`GetDisplayName`), executable name (`GetSessionIdentifier`), and unique session instance ID (`GetSessionInstanceIdentifier`).
+- **Volume & Mute Controls:** Casts `IAudioSessionControl` to `ISimpleAudioVolume` to call `SetMasterVolume` / `GetMasterVolume` and `SetMute` / `GetMute` for explicit read-back confirmation.
 
 ---
 
@@ -89,14 +111,15 @@ Sets the mute status for a specific audio session by session ID.
 1. **Prerequisites:** Windows 10/11 PC with active audio playing apps (e.g., Spotify desktop, Discord, browser with playing video/audio).
 2. **Session Discovery:**
    - Invoke `audio.sessions.list` over RPC.
-   - Confirm active apps appear with accurate process IDs, app names, current volume percentages, and mute states.
-3. **Per-App Volume Control:**
-   - Send `audio.sessions.set_volume` with `sessionId` set to Spotify's session ID and `volumePercent` set to 50.
+   - Confirm active apps appear with unique 16-character opaque IDs, associated `endpointId`, process IDs, app names, current volume percentages, and mute states.
+3. **Per-App Volume Control & Read-Back Verification:**
+   - Send `audio.sessions.set_volume` with `sessionId` set to Spotify's opaque ID and `volumePercent` set to 50.
+   - Confirm response returns `{ "status": "ok", "confirmedVolumePercent": 50 }`.
    - Confirm in Windows Volume Mixer that Spotify's app volume changes to 50% without affecting system master volume or other apps.
-4. **Per-App Mute Control:**
-   - Send `audio.sessions.set_mute` with `sessionId` set to Discord's session ID and `muted: true`.
-   - Verify Discord is muted in Windows Volume Mixer and sound output stops for Discord.
+4. **Rapid Dial Adjustment Test:**
+   - Rapidly send multiple volume updates (e.g. 10%, 20%, 30%, 40%, 50%) for a single session ID.
+   - Confirm only the active request and the final target request are dispatched to the native host, resulting in smooth volume changes.
 5. **Closed / Missing Application Handling:**
    - Close an application (e.g., Discord).
    - Send `audio.sessions.set_volume` targeting the old session ID.
-   - Confirm response returns `{ "status": "invalid_session" }` without crashing or corrupting audio state.
+   - Confirm response returns `{ "status": "invalid_session" }` without modifying other apps or system volume.

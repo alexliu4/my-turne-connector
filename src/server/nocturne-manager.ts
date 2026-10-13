@@ -805,7 +805,8 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         if (typeof volumePercent !== "number" || !Number.isFinite(volumePercent)) {
           return { result: { status: "invalid_volume" } };
         }
-        const res = await this.systemMediaService.setAudioSessionVolume(sessionId, volumePercent);
+        const deviceId = typeof p.deviceId === "string" ? p.deviceId : (typeof p.device_id === "string" ? p.device_id : undefined);
+        const res = await this.systemMediaService.setAudioSessionVolume(sessionId, volumePercent, { deviceId });
         return { result: res };
       }
 
@@ -822,7 +823,8 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         if (typeof p.muted !== "boolean") {
           return { result: { status: "unsupported" } };
         }
-        const res = await this.systemMediaService.setAudioSessionMute(sessionId, p.muted);
+        const deviceId = typeof p.deviceId === "string" ? p.deviceId : (typeof p.device_id === "string" ? p.device_id : undefined);
+        const res = await this.systemMediaService.setAudioSessionMute(sessionId, p.muted, { deviceId });
         return { result: res };
       }
 
