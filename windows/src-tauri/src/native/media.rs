@@ -1684,6 +1684,75 @@ mod tests {
     }
 
     #[test]
+    fn session_listing_without_device_includes_non_default_endpoints() {
+        let sessions = collect_audio_sessions(
+            None,
+            |_| -> Result<((), String), String> { panic!("must not resolve the default endpoint") },
+            || Ok(vec![((), "speakers".into()), ((), "headphones".into())]),
+            |_, endpoint| Ok(vec![(endpoint.to_string(), compute_session_id(endpoint, "same-instance"))]),
+        ).unwrap();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].0, "speakers");
+        assert_eq!(sessions[1].0, "headphones");
+        assert_ne!(sessions[0].1, sessions[1].1);
+        for (_, id) in &sessions {
+            assert_eq!(id.len(), 16);
+            assert!(id.bytes().all(|byte| byte.is_ascii_hexdigit()));
+        }
+        // Listing a single endpoint retains the exact same target ID.
+        let filtered = collect_audio_sessions(
+            Some("headphones"),
+            |id| Ok(((), id.to_string())),
+            || panic!("explicit filtering must not enumerate other outputs"),
+            |_, endpoint| Ok(vec![(endpoint.to_string(), compute_session_id(endpoint, "same-instance"))]),
+        ).unwrap();
+        assert_eq!(filtered, vec![sessions[1].clone()]);
+    }
+
+    #[test]
+    fn session_listing_does_not_fall_back_from_an_invalid_explicit_endpoint() {
+        let result = collect_audio_sessions::<(), ()>(
+            Some("missing"),
+            |_| Err("invalid_device".into()),
+            || panic!("must not fall back to all endpoints"),
+            |_, _| panic!("must not enumerate sessions on another endpoint"),
+        );
+        assert_eq!(result, Err("invalid_device".into()));
+    }
+
+    #[test]
+    fn session_listing_handles_no_active_endpoints() {
+        let result = collect_audio_sessions::<(), ()>(
+            None,
+            |_| panic!("must not require a default endpoint"),
+            || Ok(vec![]),
+            |_, _| panic!("there are no endpoints"),
+        );
+        assert_eq!(result, Ok(vec![]));
+    }
+
+    #[test]
+    fn session_listing_reports_enumeration_failure_instead_of_partial_success() {
+        let unavailable = collect_audio_sessions::<(), ()>(
+            None,
+            |_| panic!("must not resolve a default endpoint"),
+            || Err("unsupported".into()),
+            |_, _| panic!("endpoint discovery failed"),
+        );
+        assert_eq!(unavailable, Err("unsupported".into()));
+        let partial = collect_audio_sessions(
+            None,
+            |_| -> Result<((), String), String> { panic!("must not resolve a default endpoint") },
+            || Ok(vec![((), "speakers".into()), ((), "disconnected".into())]),
+            |_, endpoint| {
+                if endpoint == "disconnected" { Err("unsupported".into()) }
+                else { Ok(vec!["session"]) }
+            },
+        );
+        assert_eq!(partial, Err("unsupported".into()));
+    }
+
+    #[test]
     fn parse_roles_defaults_to_console_and_multimedia() {
         let roles = parse_roles(&json!({})).unwrap();
         assert_eq!(roles, vec![eConsole, eMultimedia]);
@@ -1850,6 +1919,48 @@ fn enumerate_endpoint_sessions(device: &IMMDevice, endpoint_id: &str) -> Result<
     }
 }
 
+// Keep endpoint selection separate from COM so multi-output discovery is testable
+// without audio hardware. An explicit endpoint never falls back to other outputs.
+fn collect_audio_sessions<D, S>(
+    device_id: Option<&str>,
+    resolve_explicit: impl FnOnce(&str) -> Result<(D, String), String>,
+    enumerate_active: impl FnOnce() -> Result<Vec<(D, String)>, String>,
+    mut enumerate_sessions: impl FnMut(&D, &str) -> Result<Vec<S>, String>,
+) -> Result<Vec<S>, String> {
+    let endpoints = match device_id {
+        Some(id) => vec![resolve_explicit(id)?],
+        None => enumerate_active()?,
+    };
+    let mut sessions = Vec::new();
+    for (device, endpoint_id) in endpoints {
+        sessions.extend(enumerate_sessions(&device, &endpoint_id)?);
+    }
+    Ok(sessions)
+}
+
+fn enumerate_active_render_endpoints(
+    enumerator: &IMMDeviceEnumerator,
+) -> Result<Vec<(IMMDevice, String)>, String> {
+    unsafe {
+        let collection = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE)
+            .map_err(|_| "unsupported".to_string())?;
+        let count = collection.GetCount().map_err(|_| "unsupported".to_string())?;
+        let mut endpoints = Vec::new();
+        for index in 0..count {
+            let device = collection.Item(index).map_err(|_| "unsupported".to_string())?;
+            let pwstr = device.GetId().map_err(|_| "unsupported".to_string())?;
+            let endpoint_id = pwstr.to_string();
+            CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+            let endpoint_id = endpoint_id.map_err(|_| "unsupported".to_string())?;
+            if endpoint_id.is_empty() {
+                return Err("unsupported".to_string());
+            }
+            endpoints.push((device, endpoint_id));
+        }
+        Ok(endpoints)
+    }
+}
+
 fn get_audio_sessions(device_id: Option<&str>) -> Value {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -1858,12 +1969,12 @@ fn get_audio_sessions(device_id: Option<&str>) -> Value {
             Err(_) => return json!({ "status": "unsupported", "sessions": [] }),
         };
 
-        let (device, endpoint_id) = match resolve_audio_endpoint(&enumerator, device_id) {
-            Ok(res) => res,
-            Err(status) => return json!({ "status": status, "sessions": [] }),
-        };
-
-        let discovered = match enumerate_endpoint_sessions(&device, &endpoint_id) {
+        let discovered = match collect_audio_sessions(
+            device_id,
+            |id| resolve_audio_endpoint(&enumerator, Some(id)),
+            || enumerate_active_render_endpoints(&enumerator),
+            enumerate_endpoint_sessions,
+        ) {
             Ok(s) => s,
             Err(status) => return json!({ "status": status, "sessions": [] }),
         };

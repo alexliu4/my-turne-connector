@@ -85,7 +85,8 @@ Sets the mute status for a specific audio session by exact session ID.
 - `"invalid_session"`: Session ID is empty, missing, or inactive/disappeared.
 - `"invalid_volume"`: Volume percentage is out of range (not 0-100) or non-finite.
 - `"failed"`: Native mutation or read-back confirmation failed.
-- `"unsupported"`: Core Audio session enumeration unavailable or host bridge error.
+- `"invalid_device"`: An explicitly requested endpoint cannot be resolved; discovery does not fall back to another endpoint.
+- `"unsupported"`: Core Audio session enumeration unavailable or host bridge error. If any endpoint fails during discovery, the list returns an empty array with this status rather than reporting a partial mixer as complete. No active render endpoints returns `"ok"` with an empty array.
 
 ---
 
@@ -122,6 +123,7 @@ Sets the mute status for a specific audio session by exact session ID.
 1. **Prerequisites:** Windows 10/11 PC with active audio playing apps (e.g., Spotify desktop, Discord, browser with playing video/audio).
 2. **Session Discovery:**
    - Invoke `audio.sessions.list` over RPC.
+   - Route apps to two active render endpoints (for example, speakers and headphones). With no `deviceId`, confirm sessions from both endpoints appear. Repeat with each explicit `deviceId` and confirm only that endpoint’s sessions appear with the same IDs.
    - Confirm active apps appear with unique 16-character opaque IDs, associated `endpointId`, process IDs, app names, current volume percentages, and mute states.
 3. **Per-App Volume Control & Read-Back Verification:**
    - Send `audio.sessions.set_volume` with `sessionId` set to Spotify's opaque ID and `volumePercent` set to 50.
