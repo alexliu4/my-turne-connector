@@ -781,6 +781,54 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
       }
 
       if (
+        method === "audio.sessions.list" ||
+        method === "media.get_audio_sessions" ||
+        method === "audio.get_sessions"
+      ) {
+        if (!this.systemMediaService) return { result: { status: "unsupported", sessions: [] } };
+        const deviceId = typeof p.deviceId === "string" ? p.deviceId : (typeof p.device_id === "string" ? p.device_id : undefined);
+        const res = await this.systemMediaService.getAudioSessions(deviceId);
+        return { result: res };
+      }
+
+      if (
+        method === "audio.sessions.set_volume" ||
+        method === "media.set_audio_session_volume" ||
+        method === "audio.set_session_volume"
+      ) {
+        if (!this.systemMediaService) return { result: { status: "unsupported" } };
+        const sessionId = p.sessionId ?? p.session_id ?? p.id;
+        if (typeof sessionId !== "string" || !sessionId) {
+          return { result: { status: "invalid_session" } };
+        }
+        const volumePercent = p.volumePercent ?? p.volume_percent ?? p.level;
+        if (typeof volumePercent !== "number" || !Number.isFinite(volumePercent)) {
+          return { result: { status: "invalid_volume" } };
+        }
+        const deviceId = typeof p.deviceId === "string" ? p.deviceId : (typeof p.device_id === "string" ? p.device_id : undefined);
+        const res = await this.systemMediaService.setAudioSessionVolume(sessionId, volumePercent, { deviceId });
+        return { result: res };
+      }
+
+      if (
+        method === "audio.sessions.set_mute" ||
+        method === "media.set_audio_session_mute" ||
+        method === "audio.set_session_mute"
+      ) {
+        if (!this.systemMediaService) return { result: { status: "unsupported" } };
+        const sessionId = p.sessionId ?? p.session_id ?? p.id;
+        if (typeof sessionId !== "string" || !sessionId) {
+          return { result: { status: "invalid_session" } };
+        }
+        if (typeof p.muted !== "boolean") {
+          return { result: { status: "unsupported" } };
+        }
+        const deviceId = typeof p.deviceId === "string" ? p.deviceId : (typeof p.device_id === "string" ? p.device_id : undefined);
+        const res = await this.systemMediaService.setAudioSessionMute(sessionId, p.muted, { deviceId });
+        return { result: res };
+      }
+
+      if (
         method === "app.launch" ||
         method === "app_launch.launch" ||
         method === "appLaunch.launch"

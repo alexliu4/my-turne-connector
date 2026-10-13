@@ -65,6 +65,30 @@ export interface SelectAudioOutputResponse {
   confirmed?: boolean;
 }
 
+export interface AudioSession {
+  id: string;
+  endpointId: string;
+  appName: string;
+  processId: number;
+  volumePercent: number;
+  muted: boolean;
+}
+
+export interface AudioSessionsResponse {
+  status: string;
+  sessions: AudioSession[];
+}
+
+export interface SetAudioSessionVolumeResponse {
+  status: string;
+  confirmedVolumePercent?: number;
+}
+
+export interface SetAudioSessionMuteResponse {
+  status: string;
+  confirmedMuted?: boolean;
+}
+
 // Validate both explicit fields before choosing the plural field's precedence.
 export function parseAudioOutputRoles(params: Record<string, unknown>): string[] | null {
   const validRole = (value: unknown): value is string =>
@@ -394,6 +418,200 @@ export class SystemMediaService {
       return { status, deviceId: returnedDeviceId, confirmed };
     } catch (error) {
       log.warn(`Select audio output failed: ${errorMessage(error)}`);
+      return { status: "unsupported" };
+    }
+  }
+
+  async getAudioSessions(deviceId?: string, options?: { timeoutMs?: number }): Promise<AudioSessionsResponse> {
+    try {
+      const params: Record<string, unknown> = {};
+      if (typeof deviceId === "string" && deviceId.trim().length > 0) {
+        params.deviceId = deviceId.trim();
+      }
+      const callOptions = { timeoutMs: options?.timeoutMs ?? 3000 };
+      const response = await this.hostBridge.call<unknown>("audio.sessions.list", params, callOptions);
+      const rec = asRecord(response);
+      if (!rec || rec.status === "unsupported") {
+        return { status: "unsupported", sessions: [] };
+      }
+      const status = (rec.status as string) ?? "ok";
+      const rawSessions = Array.isArray(rec.sessions) ? rec.sessions : [];
+      const sessions: AudioSession[] = rawSessions
+        .map(asRecord)
+        .filter((item): item is Record<string, unknown> => item !== null && typeof item.id === "string")
+        .map((item) => ({
+          id: item.id as string,
+          endpointId: typeof item.endpointId === "string" ? item.endpointId : (typeof item.endpoint_id === "string" ? item.endpoint_id : ""),
+          appName: typeof item.appName === "string" ? item.appName : "Application",
+          processId: typeof item.processId === "number" ? item.processId : 0,
+          volumePercent: normalizeVolumePercent(item.volumePercent ?? item.volume_percent) ?? 100,
+          muted: item.muted === true,
+        }));
+      return { status, sessions };
+    } catch (error) {
+      log.warn(`Get audio sessions failed: ${errorMessage(error)}`);
+      return { status: "unsupported", sessions: [] };
+    }
+  }
+
+  private readonly activeSessionVolumeQueue = new Map<
+    string,
+    {
+      inFlight: boolean;
+      inFlightResolver?: (res: SetAudioSessionVolumeResponse) => void;
+      pendingTarget?: { volumePercent: number; deviceId?: string };
+      pendingResolver?: (res: SetAudioSessionVolumeResponse) => void;
+    }
+  >();
+
+  async setAudioSessionVolume(
+    sessionId: string,
+    volumePercent: number,
+    options?: { timeoutMs?: number; deviceId?: string },
+  ): Promise<SetAudioSessionVolumeResponse> {
+    if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
+      return { status: "invalid_session" };
+    }
+    const normalizedPercent = normalizeVolumePercent(volumePercent);
+    if (normalizedPercent === null) {
+      return { status: "invalid_volume" };
+    }
+
+    const key = sessionId.trim();
+    let state = this.activeSessionVolumeQueue.get(key);
+
+    if (!state) {
+      let resolveFn: ((res: SetAudioSessionVolumeResponse) => void) | undefined;
+      const promise = new Promise<SetAudioSessionVolumeResponse>((resolve) => {
+        resolveFn = resolve;
+      });
+
+      state = {
+        inFlight: true,
+        inFlightResolver: resolveFn,
+      };
+      this.activeSessionVolumeQueue.set(key, state);
+
+      this.dispatchSessionVolume(key, normalizedPercent, options?.deviceId, options?.timeoutMs);
+      return promise;
+    }
+
+    if (!state.inFlight) {
+      let resolveFn: ((res: SetAudioSessionVolumeResponse) => void) | undefined;
+      const promise = new Promise<SetAudioSessionVolumeResponse>((resolve) => {
+        resolveFn = resolve;
+      });
+      state.inFlight = true;
+      state.inFlightResolver = resolveFn;
+
+      this.dispatchSessionVolume(key, normalizedPercent, options?.deviceId, options?.timeoutMs);
+      return promise;
+    }
+
+    state.pendingTarget = {
+      volumePercent: normalizedPercent,
+      deviceId: options?.deviceId ?? state.pendingTarget?.deviceId,
+    };
+
+    if (state.pendingResolver) {
+      state.pendingResolver({ status: "superseded" });
+    }
+
+    let resolveFn: ((res: SetAudioSessionVolumeResponse) => void) | undefined;
+    const promise = new Promise<SetAudioSessionVolumeResponse>((resolve) => {
+      resolveFn = resolve;
+    });
+    state.pendingResolver = resolveFn;
+
+    return promise;
+  }
+
+  private async dispatchSessionVolume(
+    sessionIdKey: string,
+    volumePercent: number,
+    deviceId?: string,
+    timeoutMs?: number,
+  ): Promise<void> {
+    const state = this.activeSessionVolumeQueue.get(sessionIdKey);
+    if (!state) return;
+
+    let result: SetAudioSessionVolumeResponse = { status: "unsupported" };
+    try {
+      const params: Record<string, unknown> = {
+        sessionId: sessionIdKey,
+        volumePercent,
+      };
+      if (typeof deviceId === "string" && deviceId.trim().length > 0) {
+        params.deviceId = deviceId.trim();
+      }
+      const callOptions = { timeoutMs: timeoutMs ?? 3000 };
+      const response = await this.hostBridge.call<unknown>(
+        "audio.sessions.set_volume",
+        params,
+        callOptions,
+      );
+      const rec = asRecord(response);
+      const status = (rec?.status as string) ?? "unsupported";
+      const confirmedVolumePercent =
+        normalizeVolumePercent(
+          rec?.confirmedVolumePercent ?? rec?.confirmed_volume_percent,
+        ) ?? undefined;
+      result = { status, confirmedVolumePercent };
+    } catch (error) {
+      log.warn(`Set audio session volume failed: ${errorMessage(error)}`);
+      result = { status: "unsupported" };
+    }
+
+    const currentResolver = state.inFlightResolver;
+    state.inFlightResolver = undefined;
+
+    if (currentResolver) {
+      currentResolver(result);
+    }
+
+    if (state.pendingTarget) {
+      const nextTarget = state.pendingTarget;
+      state.pendingTarget = undefined;
+
+      state.inFlightResolver = state.pendingResolver;
+      state.pendingResolver = undefined;
+      state.inFlight = true;
+
+      this.dispatchSessionVolume(
+        sessionIdKey,
+        nextTarget.volumePercent,
+        nextTarget.deviceId,
+        timeoutMs,
+      );
+    } else {
+      this.activeSessionVolumeQueue.delete(sessionIdKey);
+    }
+  }
+
+  async setAudioSessionMute(
+    sessionId: string,
+    muted: boolean,
+    options?: { timeoutMs?: number; deviceId?: string },
+  ): Promise<SetAudioSessionMuteResponse> {
+    if (typeof sessionId !== "string" || sessionId.trim().length === 0) {
+      return { status: "invalid_session" };
+    }
+    if (typeof muted !== "boolean") {
+      return { status: "unsupported" };
+    }
+    try {
+      const params: Record<string, unknown> = { sessionId: sessionId.trim(), muted };
+      if (typeof options?.deviceId === "string" && options.deviceId.trim().length > 0) {
+        params.deviceId = options.deviceId.trim();
+      }
+      const callOptions = { timeoutMs: options?.timeoutMs ?? 3000 };
+      const response = await this.hostBridge.call<unknown>("audio.sessions.set_mute", params, callOptions);
+      const rec = asRecord(response);
+      const status = (rec?.status as string) ?? "unsupported";
+      const confirmedMuted = typeof rec?.confirmedMuted === "boolean" ? rec.confirmedMuted : undefined;
+      return { status, confirmedMuted };
+    } catch (error) {
+      log.warn(`Set audio session mute failed: ${errorMessage(error)}`);
       return { status: "unsupported" };
     }
   }

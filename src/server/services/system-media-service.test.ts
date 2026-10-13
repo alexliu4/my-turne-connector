@@ -49,6 +49,33 @@ class FakeHostBridge implements HostBridgeClient {
     },
   ];
   selectedDeviceId: string | null = "device-1";
+  audioSessionsStatus = "ok";
+  audioSessions = [
+    {
+      id: "abc123hash",
+      endpointId: "device-1",
+      appName: "Spotify",
+      processId: 1234,
+      volumePercent: 80,
+      muted: false,
+    },
+    {
+      id: "def456hash",
+      endpointId: "device-1",
+      appName: "Discord",
+      processId: 5678,
+      volumePercent: 60,
+      muted: true,
+    },
+    {
+      id: "ghi789hash",
+      endpointId: "device-2",
+      appName: "Chrome",
+      processId: 1234,
+      volumePercent: 50,
+      muted: false,
+    },
+  ];
 
   async call<TResult = unknown>(
     method: string,
@@ -75,6 +102,27 @@ class FakeHostBridge implements HostBridgeClient {
       } else {
         this.selectedDeviceId = p.deviceId;
         response = { status: "ok", deviceId: p.deviceId, confirmed: true };
+      }
+    } else if (method === "audio.sessions.list") {
+      response = {
+        status: this.audioSessionsStatus,
+        sessions: this.audioSessions,
+      };
+    } else if (method === "audio.sessions.set_volume") {
+      const p = params as { sessionId?: string; volumePercent?: number };
+      if (!p.sessionId || p.sessionId === "missing") {
+        response = { status: "invalid_session" };
+      } else if (p.volumePercent === undefined || p.volumePercent > 100) {
+        response = { status: "invalid_volume" };
+      } else {
+        response = { status: "ok", confirmedVolumePercent: p.volumePercent };
+      }
+    } else if (method === "audio.sessions.set_mute") {
+      const p = params as { sessionId?: string; muted?: boolean };
+      if (!p.sessionId || p.sessionId === "missing") {
+        response = { status: "invalid_session" };
+      } else {
+        response = { status: "ok", confirmedMuted: p.muted };
       }
     }
     return response as TResult;
@@ -165,6 +213,102 @@ describe("SystemMediaService - Audio Output Discovery & Switching", () => {
     expect(host.calls.at(-1)).toEqual({
       method: "audio.outputs.select",
       params: { deviceId: "device-2", roles: ["console", "multimedia"] },
+    });
+  });
+
+  test("getAudioSessions enumerates active audio sessions", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.getAudioSessions();
+    expect(result.status).toBe("ok");
+    expect(result.sessions).toHaveLength(3);
+    expect(result.sessions[0]).toEqual({
+      id: "abc123hash",
+      endpointId: "device-1",
+      appName: "Spotify",
+      processId: 1234,
+      volumePercent: 80,
+      muted: false,
+    });
+    expect(host.calls.at(-1)).toEqual({ method: "audio.sessions.list", params: {} });
+  });
+
+  test("setAudioSessionVolume updates session volume with exact opaque ID and deviceId target", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.setAudioSessionVolume("abc123hash", 75, { deviceId: "device-1" });
+    expect(result.status).toBe("ok");
+    expect(result.confirmedVolumePercent).toBe(75);
+    expect(host.calls.at(-1)).toEqual({
+      method: "audio.sessions.set_volume",
+      params: { sessionId: "abc123hash", volumePercent: 75, deviceId: "device-1" },
+    });
+  });
+
+  test("setAudioSessionVolume handles invalid session and invalid volume bounds", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    expect(await service.setAudioSessionVolume("", 50)).toEqual({ status: "invalid_session" });
+    expect(await service.setAudioSessionVolume("abc123hash", -1)).toEqual({ status: "invalid_volume" });
+    expect(await service.setAudioSessionVolume("abc123hash", 101)).toEqual({ status: "invalid_volume" });
+    expect(await service.setAudioSessionVolume("missing", 50)).toEqual({ status: "invalid_session" });
+  });
+
+  test("150+ rapid setAudioSessionVolume updates coalesce cleanly with intermediate supersession and final value winning", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    let resolveInFlight: ((val: unknown) => void) | null = null;
+    const origCall = host.call.bind(host);
+    let callCount = 0;
+    host.call = async (method: string, params: unknown) => {
+      if (method === "audio.sessions.set_volume") {
+        callCount++;
+        if (callCount === 1) {
+          await new Promise((r) => { resolveInFlight = r; });
+        }
+      }
+      return origCall(method, params);
+    };
+
+    const promises = [];
+    for (let i = 1; i <= 150; i++) {
+      promises.push(service.setAudioSessionVolume("abc123hash", i % 100));
+    }
+
+    expect(callCount).toBe(1);
+
+    resolveInFlight!({});
+
+    const results = await Promise.all(promises);
+    expect(results).toHaveLength(150);
+    expect(results[0].status).toBe("ok");
+    for (let i = 1; i < 149; i++) {
+      expect(results[i].status).toBe("superseded");
+    }
+    expect(results[149].status).toBe("ok");
+
+    expect(callCount).toBe(2);
+
+    const volumeCalls = host.calls.filter((c) => c.method === "audio.sessions.set_volume");
+    expect(volumeCalls).toHaveLength(2);
+    expect((volumeCalls[0].params as { volumePercent: number }).volumePercent).toBe(1);
+    expect((volumeCalls[1].params as { volumePercent: number }).volumePercent).toBe(150 % 100);
+  });
+
+  test("setAudioSessionMute updates session mute status independently of volume queue", async () => {
+    const host = new FakeHostBridge();
+    const service = new SystemMediaService(host, new RecordingSink());
+
+    const result = await service.setAudioSessionMute("abc123hash", true, { deviceId: "device-1" });
+    expect(result.status).toBe("ok");
+    expect(result.confirmedMuted).toBeTrue();
+    expect(host.calls.at(-1)).toEqual({
+      method: "audio.sessions.set_mute",
+      params: { sessionId: "abc123hash", muted: true, deviceId: "device-1" },
     });
   });
 
