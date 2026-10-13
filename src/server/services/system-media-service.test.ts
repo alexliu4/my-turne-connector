@@ -257,7 +257,7 @@ describe("SystemMediaService - Audio Output Discovery & Switching", () => {
     expect(await service.setAudioSessionVolume("missing", 50)).toEqual({ status: "invalid_session" });
   });
 
-  test("rapid setAudioSessionVolume updates coalesce with latest-value-wins strategy", async () => {
+  test("100+ rapid setAudioSessionVolume updates coalesce cleanly with bounded state and final value winning", async () => {
     const host = new FakeHostBridge();
     const service = new SystemMediaService(host, new RecordingSink());
 
@@ -274,25 +274,27 @@ describe("SystemMediaService - Audio Output Discovery & Switching", () => {
       return origCall(method, params);
     };
 
-    const p1 = service.setAudioSessionVolume("abc123hash", 20);
-    const p2 = service.setAudioSessionVolume("abc123hash", 30);
-    const p3 = service.setAudioSessionVolume("abc123hash", 40);
+    const promises = [];
+    for (let i = 1; i <= 150; i++) {
+      promises.push(service.setAudioSessionVolume("abc123hash", i % 100));
+    }
 
     expect(callCount).toBe(1);
 
     resolveInFlight!({});
 
-    const [res1, res2, res3] = await Promise.all([p1, p2, p3]);
-    expect(res1.status).toBe("ok");
-    expect(res2.status).toBe("ok");
-    expect(res3.status).toBe("ok");
+    const results = await Promise.all(promises);
+    expect(results).toHaveLength(150);
+    for (const res of results) {
+      expect(res.status).toBe("ok");
+    }
 
     expect(callCount).toBe(2);
 
     const volumeCalls = host.calls.filter((c) => c.method === "audio.sessions.set_volume");
     expect(volumeCalls).toHaveLength(2);
-    expect((volumeCalls[0].params as { volumePercent: number }).volumePercent).toBe(20);
-    expect((volumeCalls[1].params as { volumePercent: number }).volumePercent).toBe(40);
+    expect((volumeCalls[0].params as { volumePercent: number }).volumePercent).toBe(1);
+    expect((volumeCalls[1].params as { volumePercent: number }).volumePercent).toBe(150 % 100);
   });
 
   test("setAudioSessionMute updates session mute status independently of volume queue", async () => {

@@ -1886,6 +1886,54 @@ fn get_audio_sessions(device_id: Option<&str>) -> Value {
     }
 }
 
+fn find_session_across_endpoints(
+    enumerator: &IMMDeviceEnumerator,
+    session_id: &str,
+    device_id: Option<&str>,
+) -> Result<DiscoveredSession, String> {
+    unsafe {
+        if let Some(id) = device_id {
+            let (device, endpoint_id) = resolve_audio_endpoint(enumerator, Some(id))?;
+            let sessions = enumerate_endpoint_sessions(&device, &endpoint_id)?;
+            return sessions
+                .into_iter()
+                .find(|s| s.opaque_id == session_id)
+                .ok_or_else(|| "invalid_session".to_string());
+        }
+
+        if let Ok((device, endpoint_id)) = resolve_audio_endpoint(enumerator, None) {
+            if let Ok(sessions) = enumerate_endpoint_sessions(&device, &endpoint_id) {
+                if let Some(matching) = sessions.into_iter().find(|s| s.opaque_id == session_id) {
+                    return Ok(matching);
+                }
+            }
+        }
+
+        if let Ok(collection) = enumerator.EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE) {
+            let count = collection.GetCount().unwrap_or(0);
+            for i in 0..count {
+                if let Ok(device) = collection.Item(i) {
+                    let endpoint_id = match device.GetId() {
+                        Ok(pwstr) => {
+                            let s = pwstr.to_string().unwrap_or_default();
+                            CoTaskMemFree(Some(pwstr.as_ptr() as *const _));
+                            s
+                        }
+                        Err(_) => continue,
+                    };
+                    if let Ok(sessions) = enumerate_endpoint_sessions(&device, &endpoint_id) {
+                        if let Some(matching) = sessions.into_iter().find(|s| s.opaque_id == session_id) {
+                            return Ok(matching);
+                        }
+                    }
+                }
+            }
+        }
+
+        Err("invalid_session".to_string())
+    }
+}
+
 fn set_audio_session_volume(session_id: &str, volume_percent: u8, device_id: Option<&str>) -> Value {
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
@@ -1894,19 +1942,9 @@ fn set_audio_session_volume(session_id: &str, volume_percent: u8, device_id: Opt
             Err(_) => return json!({ "status": "unsupported" }),
         };
 
-        let (device, endpoint_id) = match resolve_audio_endpoint(&enumerator, device_id) {
-            Ok(res) => res,
-            Err(status) => return json!({ "status": status }),
-        };
-
-        let sessions = match enumerate_endpoint_sessions(&device, &endpoint_id) {
+        let matching_session = match find_session_across_endpoints(&enumerator, session_id, device_id) {
             Ok(s) => s,
             Err(status) => return json!({ "status": status }),
-        };
-
-        let matching_session = match sessions.into_iter().find(|s| s.opaque_id == session_id) {
-            Some(s) => s,
-            None => return json!({ "status": "invalid_session" }),
         };
 
         let target_vol_float = (volume_percent as f32) / 100.0;
@@ -1940,19 +1978,9 @@ fn set_audio_session_mute(session_id: &str, muted: bool, device_id: Option<&str>
             Err(_) => return json!({ "status": "unsupported" }),
         };
 
-        let (device, endpoint_id) = match resolve_audio_endpoint(&enumerator, device_id) {
-            Ok(res) => res,
-            Err(status) => return json!({ "status": status }),
-        };
-
-        let sessions = match enumerate_endpoint_sessions(&device, &endpoint_id) {
+        let matching_session = match find_session_across_endpoints(&enumerator, session_id, device_id) {
             Ok(s) => s,
             Err(status) => return json!({ "status": status }),
-        };
-
-        let matching_session = match sessions.into_iter().find(|s| s.opaque_id == session_id) {
-            Some(s) => s,
-            None => return json!({ "status": "invalid_session" }),
         };
 
         if matching_session.simple_vol.SetMute(muted, std::ptr::null()).is_err() {

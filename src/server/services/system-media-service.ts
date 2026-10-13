@@ -454,7 +454,15 @@ export class SystemMediaService {
     }
   }
 
-  private readonly activeSessionVolumeQueue = new Map<string, { latestVolume: number; deviceId?: string; inFlight: boolean; pendingVolume?: number; pendingDeviceId?: string; pendingPromise?: Promise<SetAudioSessionVolumeResponse>; resolveList: Array<(res: SetAudioSessionVolumeResponse) => void> }>();
+  private readonly activeSessionVolumeQueue = new Map<
+    string,
+    {
+      inFlight: boolean;
+      inFlightResolver?: (res: SetAudioSessionVolumeResponse) => void;
+      pendingTarget?: { volumePercent: number; deviceId?: string };
+      pendingResolver?: (res: SetAudioSessionVolumeResponse) => void;
+    }
+  >();
 
   async setAudioSessionVolume(
     sessionId: string,
@@ -471,53 +479,119 @@ export class SystemMediaService {
 
     const key = sessionId.trim();
     let state = this.activeSessionVolumeQueue.get(key);
+
     if (!state) {
-      state = { latestVolume: normalizedPercent, deviceId: options?.deviceId, inFlight: false, resolveList: [] };
+      let resolveFn: ((res: SetAudioSessionVolumeResponse) => void) | undefined;
+      const promise = new Promise<SetAudioSessionVolumeResponse>((resolve) => {
+        resolveFn = resolve;
+      });
+
+      state = {
+        inFlight: true,
+        inFlightResolver: resolveFn,
+      };
       this.activeSessionVolumeQueue.set(key, state);
-    } else {
-      state.latestVolume = normalizedPercent;
-      if (options?.deviceId) state.deviceId = options.deviceId;
+
+      this.dispatchSessionVolume(key, normalizedPercent, options?.deviceId, options?.timeoutMs);
+      return promise;
     }
 
-    return new Promise<SetAudioSessionVolumeResponse>((resolve) => {
-      state!.resolveList.push(resolve);
-      this.processSessionVolumeQueue(key, options?.timeoutMs);
+    if (!state.inFlight) {
+      let resolveFn: ((res: SetAudioSessionVolumeResponse) => void) | undefined;
+      const promise = new Promise<SetAudioSessionVolumeResponse>((resolve) => {
+        resolveFn = resolve;
+      });
+      state.inFlight = true;
+      state.inFlightResolver = resolveFn;
+
+      this.dispatchSessionVolume(key, normalizedPercent, options?.deviceId, options?.timeoutMs);
+      return promise;
+    }
+
+    state.pendingTarget = {
+      volumePercent: normalizedPercent,
+      deviceId: options?.deviceId ?? state.pendingTarget?.deviceId,
+    };
+
+    if (state.pendingResolver) {
+      const oldResolve = state.pendingResolver;
+      const promise = new Promise<SetAudioSessionVolumeResponse>((resolve) => {
+        state!.pendingResolver = (res) => {
+          oldResolve(res);
+          resolve(res);
+        };
+      });
+      return promise;
+    }
+
+    let resolveFn: ((res: SetAudioSessionVolumeResponse) => void) | undefined;
+    const promise = new Promise<SetAudioSessionVolumeResponse>((resolve) => {
+      resolveFn = resolve;
     });
+    state.pendingResolver = resolveFn;
+
+    return promise;
   }
 
-  private async processSessionVolumeQueue(sessionIdKey: string, timeoutMs?: number): Promise<void> {
+  private async dispatchSessionVolume(
+    sessionIdKey: string,
+    volumePercent: number,
+    deviceId?: string,
+    timeoutMs?: number,
+  ): Promise<void> {
     const state = this.activeSessionVolumeQueue.get(sessionIdKey);
-    if (!state || state.inFlight) return;
-
-    state.inFlight = true;
-    const targetVolume = state.latestVolume;
-    const targetDeviceId = state.deviceId;
-    const resolversToNotify = [...state.resolveList];
-    state.resolveList = [];
+    if (!state) return;
 
     let result: SetAudioSessionVolumeResponse = { status: "unsupported" };
     try {
-      const params: Record<string, unknown> = { sessionId: sessionIdKey, volumePercent: targetVolume };
-      if (typeof targetDeviceId === "string" && targetDeviceId.trim().length > 0) {
-        params.deviceId = targetDeviceId.trim();
+      const params: Record<string, unknown> = {
+        sessionId: sessionIdKey,
+        volumePercent,
+      };
+      if (typeof deviceId === "string" && deviceId.trim().length > 0) {
+        params.deviceId = deviceId.trim();
       }
       const callOptions = { timeoutMs: timeoutMs ?? 3000 };
-      const response = await this.hostBridge.call<unknown>("audio.sessions.set_volume", params, callOptions);
+      const response = await this.hostBridge.call<unknown>(
+        "audio.sessions.set_volume",
+        params,
+        callOptions,
+      );
       const rec = asRecord(response);
       const status = (rec?.status as string) ?? "unsupported";
-      const confirmedVolumePercent = normalizeVolumePercent(rec?.confirmedVolumePercent ?? rec?.confirmed_volume_percent) ?? undefined;
+      const confirmedVolumePercent =
+        normalizeVolumePercent(
+          rec?.confirmedVolumePercent ?? rec?.confirmed_volume_percent,
+        ) ?? undefined;
       result = { status, confirmedVolumePercent };
     } catch (error) {
       log.warn(`Set audio session volume failed: ${errorMessage(error)}`);
       result = { status: "unsupported" };
-    } finally {
-      state.inFlight = false;
-      for (const res of resolversToNotify) res(result);
-      if (state.resolveList.length > 0) {
-        this.processSessionVolumeQueue(sessionIdKey, timeoutMs);
-      } else {
-        this.activeSessionVolumeQueue.delete(sessionIdKey);
-      }
+    }
+
+    const currentResolver = state.inFlightResolver;
+    state.inFlightResolver = undefined;
+
+    if (currentResolver) {
+      currentResolver(result);
+    }
+
+    if (state.pendingTarget) {
+      const nextTarget = state.pendingTarget;
+      state.pendingTarget = undefined;
+
+      state.inFlightResolver = state.pendingResolver;
+      state.pendingResolver = undefined;
+      state.inFlight = true;
+
+      this.dispatchSessionVolume(
+        sessionIdKey,
+        nextTarget.volumePercent,
+        nextTarget.deviceId,
+        timeoutMs,
+      );
+    } else {
+      this.activeSessionVolumeQueue.delete(sessionIdKey);
     }
   }
 
