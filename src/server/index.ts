@@ -1,3 +1,4 @@
+import { sidecarBindFailure } from "./utils/sidecar-startup";
 import { hasErrorCode } from "./utils/errors";
 import { Elysia } from "elysia";
 import { cors } from "@elysiajs/cors";
@@ -237,7 +238,22 @@ async function main() {
     });
   }
 
-  app.listen({ hostname: BIND_HOST, port: PORT });
+  try {
+    app.listen({ hostname: BIND_HOST, port: PORT });
+  } catch (error) {
+    log.errorOsCode(
+      "HTTP bind failed",
+      error !== null && typeof error === "object" && "errno" in error
+        ? error.errno
+        : undefined,
+    );
+    const signal = sidecarBindFailure(error);
+    if (windowsHost && process.env.NOCTURNE_HOST_PIPE && signal) {
+      process.exitCode = 75; // Reserved for a confirmed HTTP address-in-use startup failure.
+      process.stdout.write(signal);
+    }
+    throw error;
+  }
   serverRef = app.server ?? null;
   const boundPort = app.server?.port ?? PORT;
   log.info(`Server listening on http://${BIND_HOST}:${boundPort}`);
@@ -270,5 +286,5 @@ async function runOnlineInit(manager: NocturneManager): Promise<void> {
 
 main().catch((err) => {
   log.error(`Fatal error: ${err}`);
-  process.exit(1);
+  process.exit(process.exitCode === 75 ? 75 : 1);
 });

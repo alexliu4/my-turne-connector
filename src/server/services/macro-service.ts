@@ -32,6 +32,9 @@ export interface MacroResult {
  * Execution is restricted strictly to explicitly configured macro IDs stored in user configuration.
  */
 export class MacroService {
+  /** Transport/probe failure, independent of cached availability. */
+  statusProbeFailed = false;
+
   private isHostVerified = false;
 
   constructor(
@@ -65,6 +68,7 @@ export class MacroService {
     try {
       const response = await this.callHostWithTimeout("macros.get_status", {});
       const rec = asRecord(response);
+      this.statusProbeFailed = !rec || typeof rec.status !== "string";
       const available = rec?.status === "ok" && rec?.available === true;
       this.isHostVerified = available;
 
@@ -86,6 +90,7 @@ export class MacroService {
         macros: configuredMacros,
       };
     } catch (error) {
+      this.statusProbeFailed = true;
       log.warn(`macros.get_status call failed: ${errorMessage(error)}`);
       this.isHostVerified = false;
       return {

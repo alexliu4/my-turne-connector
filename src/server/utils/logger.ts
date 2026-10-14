@@ -49,7 +49,7 @@ function writeRotatingLog(line: string): void {
   }
 }
 
-function formatLine(level: LogLevel, category: string, msg: string, args: unknown[]): string {
+function formatLine(level: LogLevel, category: string, msg: string, args: unknown[], osErrorCode?: unknown): string {
   const suffix = args.length
     ? ` ${args.map((arg) => {
         try {
@@ -59,11 +59,19 @@ function formatLine(level: LogLevel, category: string, msg: string, args: unknow
         }
       }).join(" ")}`
     : "";
-  return boundedLogLine(`[${timestamp()}] [${level.toUpperCase()}] [${redactLogText(category)}] ${redactLogText(msg + suffix)}`).toString("utf8").trimEnd();
+  return boundedLogLine(`[${timestamp()}] [${level.toUpperCase()}] [${redactLogText(category)}] ${redactLogText(msg + suffix, osErrorCode)}`).toString("utf8").trimEnd();
 }
 
 export function createLogger(category: string) {
   return {
+    // Callers supply a numeric errno from the OS, never a parsed log payload.
+    errorOsCode(msg: string, code: unknown) {
+      if (!shouldLog("error")) return;
+      const line = formatLine("error", category, msg, [], code);
+      console.error(line);
+      writeRotatingLog(line);
+      pushRecentLog(line);
+    },
     debug(msg: string, ...args: unknown[]) {
       if (shouldLog("debug")) {
         const line = formatLine("debug", category, msg, args);

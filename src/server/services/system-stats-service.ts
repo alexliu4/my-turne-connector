@@ -22,6 +22,9 @@ interface CachedSystemStats {
 }
 
 export class SystemStatsService {
+  /** Transport/probe failure, independent of cached availability. */
+  statusProbeFailed = false;
+
   private cache: CachedSystemStats | null = null;
   private isHostVerified = false;
   private inFlightPromise: Promise<SystemStats> | null = null;
@@ -69,6 +72,7 @@ export class SystemStatsService {
     try {
       const response = await this.callHostWithTimeout("system_stats.get", {});
       const rec = asRecord(response);
+      this.statusProbeFailed = !rec || typeof rec.status !== "string";
 
       if (!rec || rec.status !== "ok") {
         this.isHostVerified = false;
@@ -113,6 +117,7 @@ export class SystemStatsService {
 
       return stats;
     } catch (error) {
+      this.statusProbeFailed = true;
       log.warn(`system_stats.get call failed: ${errorMessage(error)}`);
       this.isHostVerified = false;
       const fallback: SystemStats = {

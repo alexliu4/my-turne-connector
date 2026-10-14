@@ -209,3 +209,41 @@ it("returns a useful bounded status and export when optional details are oversiz
     expect(report.hostBridgeConnected).toBe(true);
   }
 });
+
+it("status and export share sanitized per-feature outcomes without changing cached availability", async () => {
+  const service = new MockDiagnosticsService();
+  const original = service.getDiagnostics.bind(service);
+  service.getDiagnostics = async () => ({
+    ...(await original()),
+    health: {
+      nativeHost: "unavailable",
+      sidecar: "ready",
+      bluetoothRoute: "connected",
+      featureProbe: "complete",
+      features: { volume: true },
+      featureOutcomes: {
+        volume: "error",
+        discord: "unavailable",
+        systemStats: "complete",
+        token: "private-value",
+      },
+    },
+  });
+  const app = createDiagnosticsRoutes(service, "win32", "http://localhost");
+  for (const path of ["status", "export"]) {
+    const response = await app.handle(
+      new Request(`http://localhost/api/diagnostics/${path}`, {
+        headers: { origin: "http://localhost" },
+      }),
+    );
+    expect(response.status).toBe(200);
+    const body = await response.text();
+    expect(body).not.toContain("private-value");
+    const json = JSON.parse(body);
+    const report = path === "status" ? json.diagnostics : json;
+    expect(report.health.featureProbe).toBe("complete");
+    expect(report.health.featureOutcomes.volume).toBe("error");
+    expect(report.health.featureOutcomes.discord).toBe("unavailable");
+    expect(report.health.features.volume).toBe(true);
+  }
+});

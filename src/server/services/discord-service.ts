@@ -24,6 +24,9 @@ export interface DiscordStatus {
  * - No high-frequency polling loop is created. Probes occur on startup and explicit UI/RPC status queries.
  */
 export class DiscordService {
+  /** Transport/probe failure, independent of cached availability. */
+  statusProbeFailed = false;
+
   private isRunning = false;
 
   constructor(private readonly hostBridge: HostBridgeClient) {}
@@ -60,6 +63,7 @@ export class DiscordService {
     try {
       const response = await this.callHostWithTimeout("discord.get_status", {});
       const rec = asRecord(response);
+      this.statusProbeFailed = !rec || typeof rec.status !== "string";
       const running = rec?.running === true || rec?.available === true;
       this.isRunning = running;
 
@@ -84,6 +88,7 @@ export class DiscordService {
         deafened: null,
       };
     } catch (error) {
+      this.statusProbeFailed = true;
       log.warn(`discord.get_status call failed: ${errorMessage(error)}`);
       this.isRunning = false;
       return {

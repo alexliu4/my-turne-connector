@@ -81,3 +81,19 @@ security protections is not the default recovery procedure.
 
 Oversized log files left by older versions are discarded on the first new log
 write so the documented retention ceiling also applies after upgrading.
+
+### HTTP port changed after a collision
+
+The Connector normally reuses its loopback HTTP port. If another process takes
+that port, a confirmed HTTP bind collision makes the next sidecar choose a new
+ephemeral localhost port. The host waits for current-process readiness before
+updating its remembered port and navigating an existing local UI window to the
+replacement URL. Other startup failures do not trigger this fallback. To verify,
+stop the sidecar, occupy its old port on the test PC, and observe a successful
+replacement and UI navigation. Physical acceptance of this sequence remains
+pending; automated checks cover binding classification and native recovery.
+
+A diagnostic featureProbe timeout keeps returning cached state without starting
+another overlapping refresh. Existing feature RPC deadlines normally settle it.
+If a defective refresh never settles, use the existing host restart procedure;
+there is no new background recovery loop or unsafe aggregate cancellation.

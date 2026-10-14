@@ -81,3 +81,38 @@ build, Cargo check, and Cargo release tests pass. Cargo reports 13 passing
 tests and one ignored subprocess fixture, which the lifecycle test invokes
 explicitly. Windows CI and the installer workflow validate the pushed revision
 separately; physical recovery acceptance remains pending.
+
+## Port recovery and feature-probe review
+
+A confirmed Windows HTTP EADDRINUSE startup failure emits the fixed
+NOCTURNE_STARTUP_ERROR=HTTP_ADDRESS_IN_USE signal and exits with reserved code
+75. The existing supervisor then requests PORT=0 until the current process
+announces readiness. All other startup failures retain normal retry behavior;
+the remembered port changes only on current-process readiness. That readiness
+notification also navigates an existing local WebView to the new loopback URL
+when its port changed, without opening or focusing a new window. No additional
+supervisor or polling loop is introduced.
+
+featureProbe=complete means the aggregate refresh settled, not that every
+feature worked. health.featureOutcomes allowlists the existing six names and
+complete, unavailable, error, pending, and not_probed values. Media remains
+not_probed because this refresh reads cached media state rather than adding a
+new RPC. Availability remains a separate cached observation. Transport errors
+are recorded independently even when a feature service returns an unsupported
+fallback; genuine unsupported or disabled replies remain unavailable.
+
+The three-second HTTP deadline still shares one refresh until it settles.
+Individual feature RPC wrappers already enforce two-second deadlines and abort
+pending bridge requests; volume uses the bridge's bounded-request deadline.
+There is no aggregate cancellation API that proves every child operation and
+its state writes have stopped, and abort cannot undo an already dispatched
+native operation. A genuinely unresolved aggregate therefore remains shared
+and reports timeout. It is intentionally not discarded to start overlapping
+refreshes. Settlement, including a rejected cancellation, permits another
+refresh. This residual limitation is covered by repeated-timeout concurrency
+tests; process recovery remains the existing tray/native-host procedure.
+
+Structured numeric OS error logging retains a validated signed errno or
+unsigned 32-bit error code separately from redacted message text. It never
+parses OS codes out of arbitrary text or relaxes credential/PIN detection.
+Native log files still do not persist child stdout/stderr.

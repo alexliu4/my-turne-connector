@@ -28,6 +28,7 @@ export interface DiagnosticsReport {
     bluetoothRoute: "connected" | "disconnected";
     featureProbe: "complete" | "timeout" | "error";
     features: Record<string, boolean>;
+    featureOutcomes?: Record<string, string>;
   };
   build?: { arch: string; runtime: string; version: string };
   devicesTruncated?: boolean;
@@ -38,7 +39,13 @@ export class DiagnosticsService {
   private refresh: Promise<"complete" | "error"> | null = null;
 
   constructor(
-    private readonly manager: NocturneManager,
+    private readonly manager: Pick<
+      NocturneManager,
+      | "refreshHostStatus"
+      | "getHostStatus"
+      | "getConnectionStatus"
+      | "isHostBridgeConnected"
+    > & { getHostProbeOutcomes?: () => unknown },
     private readonly probeTimeoutMs = 3_000,
   ) {}
 
@@ -116,6 +123,7 @@ export class DiagnosticsService {
         sidecar: "ready",
         bluetoothRoute: connStatus.connected ? "connected" : "disconnected",
         featureProbe,
+        featureOutcomes: this.manager.getHostProbeOutcomes?.(),
         features: Object.fromEntries(
           FEATURES.map((name) => [
             name,
@@ -274,6 +282,18 @@ export function supportReport(input: unknown): DiagnosticsReport {
             ? "timeout"
             : "error",
       features: flags(health.features),
+      featureOutcomes: Object.fromEntries(
+        FEATURES.map((name) => {
+          const outcome = object(health.featureOutcomes)[name];
+          return [
+            name,
+            typeof outcome === "string" &&
+            ["complete", "unavailable", "error", "pending"].includes(outcome)
+              ? outcome
+              : "not_probed",
+          ];
+        }),
+      ),
     };
   if (raw.build != null)
     report.build = {

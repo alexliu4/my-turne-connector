@@ -226,3 +226,80 @@ it("bounds generic redaction depth, collection sizes, strings, and cycles", () =
   expect(json).not.toContain("secret");
   expect(json.length).toBeLessThan(32_000);
 });
+
+it("repeated deadlines never replace an unresolved refresh; settlement permits recovery", async () => {
+  let calls = 0;
+  let finish!: () => void;
+  const manager = fakeManager(() => {
+    calls++;
+    return new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+  });
+  const cached = manager.getHostStatus();
+  manager.getHostStatus = () => ({
+    ...cached,
+    services: {
+      ...cached.services,
+      volume: { ...cached.services.volume, available: true },
+    },
+  });
+  const service = new DiagnosticsService(manager, 2);
+  for (let i = 0; i < 4; i++) {
+    const reports = await Promise.all(
+      Array.from({ length: 10 }, () => service.getDiagnostics()),
+    );
+    expect(
+      reports.every((report) => report.health?.featureProbe === "timeout"),
+    ).toBe(true);
+    expect(calls).toBe(1);
+    expect(
+      reports.every((report) => report.health?.features.volume === true),
+    ).toBe(true);
+  }
+  finish();
+  await Bun.sleep(0);
+  const request = service.getDiagnostics();
+  await Bun.sleep(0);
+  finish();
+  expect((await request).health?.featureProbe).toBe("complete");
+  expect(calls).toBe(2);
+});
+
+it("status and export allowlist the same outcomes independently of cached availability", async () => {
+  const manager = {
+    ...fakeManager(async () => {}),
+    getHostProbeOutcomes: () => ({
+      volume: "error",
+      discord: "unavailable",
+      systemStats: "complete",
+      params: { token: "private-value" },
+    }),
+  };
+  const service = new DiagnosticsService(manager);
+  for (const report of [
+    await service.getDiagnostics(),
+    await service.getRedactedExport(),
+  ]) {
+    expect(report.health?.featureProbe).toBe("complete");
+    expect(report.health?.featureOutcomes?.volume).toBe("error");
+    expect(report.health?.featureOutcomes?.discord).toBe("unavailable");
+    expect(report.health?.features.volume).toBe(false);
+    expect(JSON.stringify(report)).not.toContain("private-value");
+    expect(Object.keys(report.health?.featureOutcomes ?? {})).toHaveLength(6);
+  }
+});
+
+it("a canceled and settled refresh releases single flight for a new request", async () => {
+  let calls = 0;
+  const service = new DiagnosticsService(
+    fakeManager(async () => {
+      if (++calls === 1) throw new DOMException("private-value", "AbortError");
+    }),
+  );
+  expect((await service.getDiagnostics()).health?.featureProbe).toBe("error");
+  expect((await service.getDiagnostics()).health?.featureProbe).toBe(
+    "complete",
+  );
+  expect(calls).toBe(2);
+});

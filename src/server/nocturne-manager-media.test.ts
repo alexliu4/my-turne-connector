@@ -671,3 +671,70 @@ describe("NocturneManager system media routing", () => {
     ).resolves.toEqual({ error: "Unknown method: media.control.previous" });
   });
 });
+
+class ProbeHostBridge extends FakeMediaHostBridge {
+  constructor(
+    private readonly failing: string | null = null,
+    private readonly unsupported: string | null = null,
+  ) {
+    super();
+  }
+  override async call<TResult = unknown>(
+    method: string,
+    params: unknown = {},
+  ): Promise<TResult> {
+    this.calls.push({ method, params });
+    if (this.failing === "all" || method === this.failing)
+      throw new Error("private-token-example");
+    const result: unknown =
+      method === this.unsupported
+        ? { status: "unsupported" }
+        : {
+            status: "ok",
+            available: true,
+            running: true,
+            volume_percent: 50,
+            muted: false,
+            cpu_percent: 20,
+          };
+    return result as TResult;
+  }
+}
+
+test.each([null, "discord.get_status", "all"])(
+  "refresh settled outcomes distinguish individual transport failures (%s)",
+  async (failing) => {
+    const host = new ProbeHostBridge(failing);
+    const manager = new NocturneManager({
+      platform: "win32",
+      hostBridge: host,
+      bluetoothService: fakeBluetoothService(),
+      spotifySkipPreferenceStore: new MemoryBooleanPreference(false),
+      systemMediaPreferenceStore: new MemoryBooleanPreference(true),
+    });
+    await manager.refreshHostStatus();
+    const outcomes = manager.getHostProbeOutcomes();
+    expect(host.calls).toHaveLength(5);
+    expect(outcomes.media).toBe("not_probed");
+    expect(outcomes.discord).toBe(failing ? "error" : "complete");
+    if (failing === "all") expect(outcomes.volume).toBe("error");
+    else expect(outcomes.volume).toBe("complete");
+    expect(JSON.stringify(outcomes)).not.toContain("private-token-example");
+    host.close();
+  },
+);
+
+test("unsupported telemetry is unavailable rather than a failed probe", async () => {
+  const host = new ProbeHostBridge(null, "system_stats.get");
+  const manager = new NocturneManager({
+    platform: "win32",
+    hostBridge: host,
+    bluetoothService: fakeBluetoothService(),
+    spotifySkipPreferenceStore: new MemoryBooleanPreference(false),
+    systemMediaPreferenceStore: new MemoryBooleanPreference(true),
+  });
+  await manager.refreshHostStatus();
+  expect(manager.getHostProbeOutcomes().systemStats).toBe("unavailable");
+  expect(manager.getHostProbeOutcomes().discord).toBe("complete");
+  host.close();
+});

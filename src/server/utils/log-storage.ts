@@ -42,12 +42,27 @@ export function appendRotatingLog(path: string, line: string, maxBytes = LOG_FIL
   appendFileSync(path, bytes, { mode: 0o600 });
 }
 
-export function redactLogText(text: string): string {
+export function redactLogText(text: string, osErrorCode?: unknown): string {
+  const suffix =
+    typeof osErrorCode === "number" &&
+    Number.isInteger(osErrorCode) &&
+    osErrorCode >= -2147483648 &&
+    osErrorCode <= 4294967295
+      ? ` OS error errno=${osErrorCode}`
+      : "";
   // Unstructured error responses can contain malformed/escaped JSON; suppress
   // the entire payload when a credential assignment is detected.
-  if (/(?:token|secret|password|credential|authorization|cookie|api[_-]?key|pin|code)[\s\\"']*[:=]/i.test(text)
-      || /\b(?:Bearer|Basic)\s+\S+/i.test(text)
-      || /https?:\/\/[^\s/]+:[^\s/]+@/i.test(text)) return "[REDACTED sensitive log payload]";
-  return text.replace(/([a-z]:[/\\]Users[/\\])[^/\\\s"']+/gi, "$1[REDACTED]")
-    .replace(/(\/(?:Users|home)\/)[^/\s"']+/g, "$1[REDACTED]");
+  if (
+    /(?:token|secret|password|credential|authorization|cookie|api[_-]?key|pin|code)[\s\\"']*[:=]/i.test(
+      text,
+    ) ||
+    /\b(?:Bearer|Basic)\s+\S+/i.test(text) ||
+    /https?:\/\/[^\s/]+:[^\s/]+@/i.test(text)
+  )
+    return "[REDACTED sensitive log payload]" + suffix;
+  return (
+    text
+      .replace(/([a-z]:[/\\]Users[/\\])[^/\\\s"']+/gi, "$1[REDACTED]")
+      .replace(/(\/(?:Users|home)\/)[^/\s"']+/g, "$1[REDACTED]") + suffix
+  );
 }

@@ -145,6 +145,8 @@ class FileSystemMediaPreferenceStore implements SystemMediaPreferenceStore {
 }
 
 export class SystemMediaService {
+  volumeProbeFailed = false;
+
   private readonly unsubscribe: Array<() => void> = [];
   private readonly pendingDeliveries = new Set<Promise<void>>();
   private latestMetadataDelivery: {
@@ -264,10 +266,12 @@ export class SystemMediaService {
       const callOptions = options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {};
       response = await this.hostBridge.call<unknown>("volume.get", {}, callOptions);
     } catch (error) {
+      this.volumeProbeFailed = true;
       this.volumeSupported = false;
       throw error;
     }
     const rec = asRecord(response);
+    this.volumeProbeFailed = !rec || (typeof rec.status === "string" && !["ok", "unsupported", "disabled"].includes(rec.status));
     if (!rec || rec.status === "unsupported") {
       if (rec?.status === "unsupported") this.volumeRevision++;
       this.volumeSupported = false;
@@ -275,6 +279,7 @@ export class SystemMediaService {
     }
     const volume_percent = normalizeVolumePercent(rec.volume_percent ?? rec.volumePercent);
     if (volume_percent === null) {
+      this.volumeProbeFailed = true;
       this.volumeSupported = false;
       return null;
     }

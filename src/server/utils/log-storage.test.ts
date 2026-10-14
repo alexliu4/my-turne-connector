@@ -48,3 +48,19 @@ it("redacts console and in-memory log outputs and bounds recent history", () => 
     expect(JSON.stringify(recent)).not.toContain("private-example");
   } finally { output.mockRestore(); }
 });
+
+it("keeps structured numeric OS error evidence without weakening payload redaction", () => {
+  expect(redactLogText("OS failure code: 5", 5)).toBe(
+    "[REDACTED sensitive log payload] OS error errno=5",
+  );
+  expect(redactLogText("pin=123456 password=private", -4091)).toBe(
+    "[REDACTED sensitive log payload] OS error errno=-4091",
+  );
+  for (const code of ["123456", NaN, Infinity, {}, 1.1])
+    expect(redactLogText("code: 123456", code)).toBe(
+      "[REDACTED sensitive log payload]",
+    );
+  expect(
+    boundedLogLine(redactLogText("x".repeat(10000), 5)).length,
+  ).toBeLessThanOrEqual(8192);
+});

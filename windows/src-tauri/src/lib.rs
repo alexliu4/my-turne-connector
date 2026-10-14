@@ -47,7 +47,7 @@ pub fn run() {
             app.manage(state.clone());
             HostState::enable_autostart(app.handle());
             state.install_tray(app)?;
-            state.start_services();
+            state.start_services(app.handle().clone());
             if open_initial_window || HostState::take_early_window_request() {
                 HostState::request_window(app.handle());
             }

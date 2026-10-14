@@ -20,6 +20,10 @@ fn connector_window_url(port: u16) -> String {
     format!("http://127.0.0.1:{port}/?connector-platform=windows")
 }
 
+fn window_needs_port_recovery(url: &tauri::Url, port: u16) -> bool {
+    is_local_connector_url(url) && url.port_or_known_default() != Some(port)
+}
+
 fn is_local_connector_url(url: &tauri::Url) -> bool {
     url.scheme() == "http" && matches!(url.host_str(), Some("127.0.0.1") | Some("localhost"))
 }
@@ -120,7 +124,7 @@ impl HostState {
         Ok(())
     }
 
-    pub fn start_services(&self) {
+    pub fn start_services(&self, app: AppHandle) {
         let bridge = self.bridge.clone();
         tauri::async_runtime::spawn(async move {
             if let Err(error) = bridge.serve().await {
@@ -137,6 +141,30 @@ impl HostState {
             self.sidecar_ready.clone(),
             self.shutting_down.clone(),
             self.child_slot.clone(),
+            Arc::new(move || {
+                let current_app = app.clone();
+                let _ = app.run_on_main_thread(move || {
+                    if let Some(window) = current_app.get_webview_window("main") {
+                        if let Some(state) = current_app.try_state::<HostState>() {
+                            if let Some(port) =
+                                sidecar::ready_port(&state.sidecar_ready, &state.sidecar_port)
+                            {
+                                if let Ok(url) = window.url() {
+                                    if window_needs_port_recovery(&url, port) {
+                                        if let Ok(target) = connector_window_url(port).parse() {
+                                            if let Err(error) = window.navigate(target) {
+                                                eprintln!(
+                                                    "Unable to recover Connector window: {error}"
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            }),
         );
         tauri::async_runtime::spawn(async move {
             bridge.start_native().await;
@@ -215,6 +243,16 @@ impl HostState {
             .ok_or_else(|| "Connector server is still starting".to_string())?;
 
         if let Some(window) = app.get_webview_window("main") {
+            let current = window.url().map_err(|error| error.to_string())?;
+            if window_needs_port_recovery(&current, port) {
+                window
+                    .navigate(
+                        connector_window_url(port)
+                            .parse()
+                            .map_err(|error| format!("invalid connector URL: {error}"))?,
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
             window.show().map_err(|error| error.to_string())?;
             window.unminimize().map_err(|error| error.to_string())?;
             window.set_focus().map_err(|error| error.to_string())?;
@@ -259,6 +297,22 @@ impl HostState {
 #[cfg(test)]
 mod tests {
     use super::{connector_window_url, is_local_connector_url, should_open_in_default_browser};
+
+    #[test]
+    fn existing_window_recovers_only_on_a_real_local_port_change() {
+        let url: tauri::Url = connector_window_url(43210).parse().unwrap();
+        assert!(!super::window_needs_port_recovery(&url, 43210));
+        assert!(super::window_needs_port_recovery(&url, 54321));
+        let recovered: tauri::Url = connector_window_url(54321).parse().unwrap();
+        assert!(is_local_connector_url(&recovered));
+        assert_eq!(recovered.port(), Some(54321));
+        assert!(recovered
+            .query()
+            .unwrap()
+            .contains("connector-platform=windows"));
+        let external: tauri::Url = "https://example.com/".parse().unwrap();
+        assert!(!super::window_needs_port_recovery(&external, 54321));
+    }
 
     #[test]
     fn connector_window_url_marks_only_the_native_windows_ui() {

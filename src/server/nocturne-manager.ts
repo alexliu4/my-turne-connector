@@ -56,6 +56,17 @@ export interface ConnectorCapabilities {
   appLaunch: boolean;
 }
 
+export type FeatureProbeOutcome =
+  | "complete"
+  | "unavailable"
+  | "error"
+  | "pending"
+  | "not_probed";
+export type FeatureProbeOutcomes = Record<
+  keyof ConnectorCapabilities,
+  FeatureProbeOutcome
+>;
+
 export interface HostStatus {
   platform: string;
   connectorPlatform: string | null;
@@ -1560,25 +1571,91 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     return true;
   }
 
+  private hostProbeOutcomes: FeatureProbeOutcomes = {
+    volume: "not_probed",
+    media: "not_probed",
+    discord: "not_probed",
+    systemStats: "not_probed",
+    appLaunch: "not_probed",
+    macros: "not_probed",
+  };
+
+  getHostProbeOutcomes(): FeatureProbeOutcomes {
+    return { ...this.hostProbeOutcomes };
+  }
+
   async refreshHostStatus(): Promise<HostStatus> {
-    const promises: Array<Promise<unknown>> = [];
-    if (this.discordService) {
-      promises.push(this.discordService.getStatus().catch(() => null));
-    }
-    if (this.systemStatsService) {
-      promises.push(this.systemStatsService.getStats().catch(() => null));
-    }
-    if (this.appLaunchService) {
-      promises.push(this.appLaunchService.getStatus().catch(() => null));
-    }
-    if (this.macroService) {
-      promises.push(this.macroService.getStatus().catch(() => null));
-    }
-    if (this.systemMediaService) {
+    const probe = async (
+      name: keyof ConnectorCapabilities,
+      run: () => Promise<unknown>,
+      failed: () => boolean = () => false,
+    ) => {
+      this.hostProbeOutcomes[name] = "pending";
+      try {
+        const result = await run();
+        const status =
+          result && typeof result === "object" && "status" in result
+            ? result.status
+            : null;
+        this.hostProbeOutcomes[name] = failed()
+          ? "error"
+          : result === null ||
+              (typeof result === "object" &&
+                "available" in result &&
+                result.available === false &&
+                status === "ok") ||
+              status === "unsupported" ||
+              status === "disabled" ||
+              status === "unavailable"
+            ? "unavailable"
+            : status !== null && status !== "ok"
+              ? "error"
+              : "complete";
+      } catch {
+        this.hostProbeOutcomes[name] = "error";
+      }
+    };
+    const promises: Promise<void>[] = [];
+    if (this.discordService)
       promises.push(
-        this.systemMediaService.getVolume({ timeoutMs: 2_000 }).catch(() => null),
+        probe(
+          "discord",
+          () => this.discordService!.getStatus(),
+          () => this.discordService!.statusProbeFailed,
+        ),
       );
-    }
+    if (this.systemStatsService)
+      promises.push(
+        probe(
+          "systemStats",
+          () => this.systemStatsService!.getStats(),
+          () => this.systemStatsService!.statusProbeFailed,
+        ),
+      );
+    if (this.appLaunchService)
+      promises.push(
+        probe(
+          "appLaunch",
+          () => this.appLaunchService!.getStatus(),
+          () => this.appLaunchService!.statusProbeFailed,
+        ),
+      );
+    if (this.macroService)
+      promises.push(
+        probe(
+          "macros",
+          () => this.macroService!.getStatus(),
+          () => this.macroService!.statusProbeFailed,
+        ),
+      );
+    if (this.systemMediaService)
+      promises.push(
+        probe(
+          "volume",
+          () => this.systemMediaService!.getVolume({ timeoutMs: 2_000 }),
+          () => this.systemMediaService!.volumeProbeFailed,
+        ),
+      );
     await Promise.allSettled(promises);
     return this.getHostStatus();
   }

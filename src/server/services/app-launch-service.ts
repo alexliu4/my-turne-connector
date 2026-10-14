@@ -28,6 +28,9 @@ export interface AppLaunchResult {
  * To ensure remote execution safety, launch operations validate strictly against locally configured application definitions.
  */
 export class AppLaunchService {
+  /** Transport/probe failure, independent of cached availability. */
+  statusProbeFailed = false;
+
   private isHostVerified = false;
 
   constructor(
@@ -60,6 +63,7 @@ export class AppLaunchService {
     try {
       const response = await this.callHostWithTimeout("app_launch.get_status", {});
       const rec = asRecord(response);
+      this.statusProbeFailed = !rec || typeof rec.status !== "string";
       const available = rec?.status === "ok" && rec?.available === true;
       this.isHostVerified = available;
 
@@ -81,6 +85,7 @@ export class AppLaunchService {
         apps: configuredApps,
       };
     } catch (error) {
+      this.statusProbeFailed = true;
       log.warn(`app_launch.get_status call failed: ${errorMessage(error)}`);
       this.isHostVerified = false;
       return {
