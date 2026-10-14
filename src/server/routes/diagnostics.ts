@@ -18,7 +18,8 @@ export function createDiagnosticsRoutes(
         return { error: "Diagnostics API is localhost-only" };
       }
     })
-    .get("/status", async () => {
+    .get("/status", async ({ set }) => {
+      set.headers["cache-control"] = "no-store";
       const report = await diagnosticsService.getDiagnostics();
       return { status: "ok", diagnostics: report };
     })
@@ -26,6 +27,8 @@ export function createDiagnosticsRoutes(
       try {
         const redacted = await diagnosticsService.getRedactedExport();
         const jsonString = JSON.stringify(redacted, null, 2);
+        if (Buffer.byteLength(jsonString) > 256 * 1024) throw new Error("Diagnostics export exceeds limit");
+        set.headers["cache-control"] = "no-store";
 
         set.headers["content-type"] = "application/json";
         set.headers["content-disposition"] = `attachment; filename="nocturne-connector-diagnostics-${Date.now()}.json"`;

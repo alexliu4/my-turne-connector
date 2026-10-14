@@ -48,3 +48,39 @@ describe("DiagnosticsService & Redaction Logic", () => {
     expect(redacted.user.nested.path).toBe("C:\\Users\\[REDACTED]\\file.txt");
   });
 });
+
+import { DiagnosticsService } from "./diagnostics-service";
+
+function fakeManager(refresh: () => Promise<unknown>, connected = false) {
+  return {
+    refreshHostStatus: refresh,
+    getHostStatus: () => ({ services: { volume: { available: false } } }),
+    getConnectionStatus: () => ({ connected: true, deviceCount: 1, devices: [{ deviceInfo: { device: "Car Thing", version: "1.0" } }] }),
+    isHostBridgeConnected: () => connected,
+  } as unknown as ConstructorParameters<typeof DiagnosticsService>[0];
+}
+
+it("returns cached health within the deadline and shares an in-flight probe", async () => {
+  let calls = 0;
+  let finish!: () => void;
+  const service = new DiagnosticsService(fakeManager(() => { calls++; return new Promise<void>((resolve) => { finish = resolve; }); }), 10);
+  const reports = await Promise.all([service.getDiagnostics(), service.getRedactedExport()]);
+  expect(calls).toBe(1);
+  for (const report of reports) {
+    expect(report.health).toMatchObject({ nativeHost: "unavailable", sidecar: "ready", bluetoothRoute: "connected", featureProbe: "timeout" });
+  }
+  await service.getDiagnostics();
+  expect(calls).toBe(1);
+  finish();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await service.getDiagnostics();
+  expect(calls).toBe(2);
+  finish();
+});
+
+it("reports probe failure independently of route and native connectivity", async () => {
+  const service = new DiagnosticsService(fakeManager(async () => { throw new Error("secret"); }, true));
+  const report = await service.getDiagnostics();
+  expect(report.health).toMatchObject({ nativeHost: "connected", bluetoothRoute: "connected", featureProbe: "error" });
+  expect(JSON.stringify(report)).not.toContain("secret");
+});

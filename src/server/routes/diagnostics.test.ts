@@ -106,6 +106,7 @@ it("omits JSON secrets from complete status and export HTTP responses", async ()
   log.warn('Malformed response {"access_token":"sensitive-example-value');
   const manager = {
     refreshHostStatus: async () => null,
+    getHostStatus: () => null,
     getConnectionStatus: () => ({ connected: false, deviceCount: 0, devices: [] }),
     isHostBridgeConnected: () => false,
   } as unknown as ConstructorParameters<typeof DiagnosticsService>[0];

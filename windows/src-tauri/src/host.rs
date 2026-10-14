@@ -84,7 +84,8 @@ impl HostState {
     pub fn install_tray(&self, app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         let open = MenuItem::with_id(app, "open", "Open Nocturne Connector", true, None::<&str>)?;
         let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-        let menu = Menu::with_items(app, &[&open, &quit])?;
+        let logs = MenuItem::with_id(app, "logs", "Open Diagnostic Logs", true, None::<&str>)?;
+        let menu = Menu::with_items(app, &[&open, &logs, &quit])?;
         let mut builder = TrayIconBuilder::new()
             .icon(TRAY_ICON)
             .menu(&menu)
@@ -93,6 +94,13 @@ impl HostState {
             .on_menu_event(|app, event| match event.id.as_ref() {
                 "open" => {
                     Self::request_window(app);
+                }
+                "logs" => {
+                    if let Some(directory) = crate::logging::log_directory() {
+                        if fs::create_dir_all(&directory).is_ok() {
+                            let _ = tauri_plugin_opener::open_path(&directory, None::<&str>);
+                        }
+                    }
                 }
                 "quit" => {
                     if let Some(state) = app.try_state::<HostState>() {
@@ -117,6 +125,7 @@ impl HostState {
         tauri::async_runtime::spawn(async move {
             if let Err(error) = bridge.serve().await {
                 eprintln!("Nocturne host bridge stopped: {error}");
+                crate::logging::write("Native host bridge listener stopped");
             }
         });
 

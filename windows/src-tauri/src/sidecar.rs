@@ -6,7 +6,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::bridge::BridgeServer;
 
@@ -14,6 +14,33 @@ pub struct ManagedChild {
     child: Child,
     #[cfg(windows)]
     job: JobObject,
+}
+
+// A reader from an exited attempt must never announce replacement readiness.
+struct ReadinessLease {
+    active: Arc<Mutex<bool>>,
+    ready: Arc<AtomicBool>,
+}
+
+impl Drop for ReadinessLease {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.active.lock() {
+            *active = false;
+            self.ready.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn publish_ready(active: &Mutex<bool>, ready: &AtomicBool, port: &Mutex<Option<u16>>, value: u16) {
+    let Ok(active) = active.lock() else { return };
+    if !*active || value == 0 {
+        return;
+    }
+    if let Ok(mut target) = port.lock() {
+        *target = Some(value);
+        ready.store(true, Ordering::Release);
+        crate::logging::write("Sidecar HTTP ready");
+    }
 }
 
 pub type ChildSlot = Arc<Mutex<Option<ManagedChild>>>;
@@ -29,13 +56,16 @@ pub fn supervise(
         let mut restart_delay = Duration::from_secs(1);
         while !shutting_down.load(Ordering::Acquire) {
             ready.store(false, Ordering::Release);
-            match spawn_once(&bridge, &port, &ready, &child_slot) {
+            let started = Instant::now();
+            crate::logging::write("Sidecar launch attempt");
+            match spawn_once(&bridge, &port, &ready, &child_slot, &shutting_down) {
                 Ok(status) => {
                     eprintln!("Nocturne Connector server exited with {status}");
-                    restart_delay = Duration::from_secs(1);
+                    crate::logging::write(&format!("Sidecar exited code={status}"));
                 }
                 Err(error) => {
                     eprintln!("Nocturne Connector server failed to start: {error}");
+                    crate::logging::write("Sidecar failed to start or exited unsuccessfully; check installation and OS security history");
                 }
             }
             ready.store(false, Ordering::Release);
@@ -44,14 +74,32 @@ pub fn supervise(
             if shutting_down.load(Ordering::Acquire) {
                 break;
             }
-            thread::sleep(restart_delay);
-            restart_delay = (restart_delay * 2).min(Duration::from_secs(30));
+            if started.elapsed() >= Duration::from_secs(60) {
+                restart_delay = Duration::from_secs(1);
+            }
+            crate::logging::write(&format!(
+                "Sidecar restart scheduled delay_seconds={}",
+                restart_delay.as_secs()
+            ));
+            // Quit remains responsive during backoff.
+            for _ in 0..restart_delay.as_millis() / 100 {
+                if shutting_down.load(Ordering::Acquire) {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(100));
+            }
+            restart_delay = next_restart_delay(restart_delay);
         }
     });
 }
 
+fn next_restart_delay(delay: Duration) -> Duration {
+    (delay * 2).min(Duration::from_secs(30))
+}
+
 pub fn stop(shutting_down: &AtomicBool, child_slot: &ChildSlot) {
     shutting_down.store(true, Ordering::Release);
+    crate::logging::write("Native host shutdown requested");
     if let Ok(mut child) = child_slot.lock() {
         if let Some(process) = child.as_mut() {
             #[cfg(windows)]
@@ -67,6 +115,7 @@ fn spawn_once(
     port: &Arc<Mutex<Option<u16>>>,
     ready: &Arc<AtomicBool>,
     child_slot: &ChildSlot,
+    shutting_down: &AtomicBool,
 ) -> Result<i32, String> {
     let requested_port = port.lock().ok().and_then(|current_port| *current_port);
     let executable = server_executable();
@@ -75,6 +124,9 @@ fn spawn_once(
     } else if let Ok(fallback) = std::env::var("NOCTURNE_SERVER_COMMAND") {
         Command::new(fallback)
     } else {
+        crate::logging::write(
+            "Sidecar executable missing; reinstall the complete Windows artifact",
+        );
         return Err(format!(
             "server executable does not exist: {}",
             executable.display()
@@ -102,7 +154,13 @@ fn spawn_once(
         command.creation_flags(0x08000000);
     }
 
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    let mut child = command.spawn().map_err(|error| {
+        crate::logging::write(&format!(
+            "Sidecar process creation failed os_code={:?}; check OS security history",
+            error.raw_os_error()
+        ));
+        error.to_string()
+    })?;
     #[cfg(windows)]
     let job = match JobObject::new(&child) {
         Ok(job) => job,
@@ -113,17 +171,19 @@ fn spawn_once(
     };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    let lease = ReadinessLease {
+        active: Arc::new(Mutex::new(true)),
+        ready: Arc::clone(ready),
+    };
     if let Some(stdout) = stdout {
+        let active = Arc::clone(&lease.active);
         let port = Arc::clone(port);
         let ready = Arc::clone(ready);
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Some(value) = line.strip_prefix("NOCTURNE_READY_PORT=") {
                     if let Ok(value) = value.trim().parse::<u16>() {
-                        if let Ok(mut target) = port.lock() {
-                            *target = Some(value);
-                            ready.store(true, Ordering::Release);
-                        }
+                        publish_ready(&active, &ready, &port, value);
                     }
                 }
                 eprintln!("[connector] {line}");
@@ -142,6 +202,12 @@ fn spawn_once(
         let mut slot = child_slot
             .lock()
             .map_err(|_| "child slot is poisoned".to_string())?;
+        if shutting_down.load(Ordering::Acquire) {
+            #[cfg(windows)]
+            job.terminate();
+            let _ = child.kill();
+            return Err("shutdown requested during sidecar startup".to_string());
+        }
         *slot = Some(ManagedChild {
             child,
             #[cfg(windows)]
@@ -169,6 +235,12 @@ fn spawn_once(
     if let Ok(mut slot) = child_slot.lock() {
         *slot = None;
     }
+    drop(lease);
+    crate::logging::write(&format!(
+        "Sidecar process ended exit_code={:?} success={}",
+        status.code(),
+        status.success()
+    ));
     if status.success() {
         Ok(status.code().unwrap_or(0))
     } else {
@@ -259,5 +331,36 @@ impl Drop for JobObject {
                 self.0 as *mut std::ffi::c_void,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn stale_reader_cannot_publish_readiness() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let lease = ReadinessLease {
+            active: Arc::new(Mutex::new(true)),
+            ready: Arc::clone(&ready),
+        };
+        let active = Arc::clone(&lease.active);
+        let port = Mutex::new(None);
+        publish_ready(&active, &ready, &port, 1000);
+        assert!(ready.load(Ordering::Acquire));
+        drop(lease);
+        publish_ready(&active, &ready, &port, 2000);
+        assert!(!ready.load(Ordering::Acquire));
+        assert_eq!(*port.lock().unwrap(), Some(1000));
+    }
+    #[test]
+    fn restart_backoff_is_capped() {
+        let mut delay = Duration::from_secs(1);
+        let mut values = Vec::new();
+        for _ in 0..8 {
+            values.push(delay.as_secs());
+            delay = next_restart_delay(delay);
+        }
+        assert_eq!(values, [1, 2, 4, 8, 16, 30, 30, 30]);
     }
 }

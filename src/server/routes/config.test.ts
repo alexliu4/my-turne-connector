@@ -222,6 +222,7 @@ it("protects both privileged route groups with permissive global CORS on the act
   const { DiagnosticsService } = await import("../services/diagnostics-service");
   const manager = {
     refreshHostStatus: async () => null,
+    getHostStatus: () => null,
     getConnectionStatus: () => ({ connected: false, deviceCount: 0, devices: [] }),
     isHostBridgeConnected: () => false,
   } as unknown as ConstructorParameters<typeof DiagnosticsService>[0];

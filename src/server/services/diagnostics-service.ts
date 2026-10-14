@@ -18,16 +18,51 @@ export interface DiagnosticsReport {
   }>;
   hostStatus: HostStatus | null;
   recentLogs: string[];
+  health?: {
+    nativeHost: "connected" | "unavailable" | "unsupported";
+    sidecar: "ready";
+    bluetoothRoute: "connected" | "disconnected";
+    featureProbe: "complete" | "timeout" | "error";
+    features: Record<string, boolean>;
+  };
+  build?: { arch: string; runtime: string; version: string };
+  devicesTruncated?: boolean;
 }
 
 export class DiagnosticsService {
-  constructor(private readonly manager: NocturneManager) {}
+  private refresh: Promise<"complete" | "error"> | null = null;
+
+  constructor(
+    private readonly manager: NocturneManager,
+    private readonly probeTimeoutMs = 3_000,
+  ) {}
+
+  private async probe(): Promise<"complete" | "timeout" | "error"> {
+    // Keep ownership until the actual refresh settles, even after a deadline.
+    if (!this.refresh) {
+      this.refresh = Promise.resolve().then(() => this.manager.refreshHostStatus())
+        .then(() => "complete" as const, () => "error" as const)
+        .finally(() => { this.refresh = null; });
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        this.refresh,
+        new Promise<"timeout">((resolve) => {
+          timer = setTimeout(() => resolve("timeout"), this.probeTimeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   async getDiagnostics(): Promise<DiagnosticsReport> {
-    const hostStatus = await this.manager.refreshHostStatus();
+    const featureProbe = await this.probe();
+    const hostStatus = this.manager.getHostStatus();
     const connStatus = this.manager.getConnectionStatus();
 
-    const carThingDevices = connStatus.devices.map((d, index) => ({
+    const carThingDevices = connStatus.devices.slice(0, 32).map((d, index) => ({
       deviceIndex: index + 1,
       deviceType: d.deviceInfo?.device ?? "Nocturne Car Thing",
       firmwareVersion: d.deviceInfo?.version ?? "unknown",
@@ -42,7 +77,17 @@ export class DiagnosticsService {
       return `Recent ${level} entries: ${count}`;
     });
 
+    const hostConnected = this.manager.isHostBridgeConnected();
     const report: DiagnosticsReport = {
+      health: {
+        nativeHost: hostConnected === null ? "unsupported" : hostConnected ? "connected" : "unavailable",
+        sidecar: "ready",
+        bluetoothRoute: connStatus.connected ? "connected" : "disconnected",
+        featureProbe,
+        features: Object.fromEntries(Object.entries(hostStatus?.services ?? {}).map(([name, state]) => [name, state.available === true])),
+      },
+      build: { arch: process.arch, runtime: `Bun ${Bun.version}`, version: getConnectorVersion() },
+      devicesTruncated: connStatus.devices.length > 32,
       timestamp: new Date().toISOString(),
       version: getConnectorVersion(),
       platform: process.platform,
@@ -93,7 +138,7 @@ export function redactSensitiveText(text: string): string {
 
 export function redactValue(val: unknown): unknown {
   if (typeof val === "string") {
-    return redactSensitiveText(val);
+    return redactSensitiveText(val.slice(0, 512));
   }
 
   if (Array.isArray(val)) {

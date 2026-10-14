@@ -129,7 +129,7 @@ export class AppLaunchService {
         error: typeof rec.error === "string" ? rec.error : undefined,
       };
     } catch (error) {
-      log.warn(`app_launch.launch call failed for ${appId}: ${errorMessage(error)}`);
+      log.warn("app_launch.launch call failed");
       return {
         status: "error",
         app: appId,

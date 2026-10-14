@@ -174,7 +174,7 @@ export class MacroService {
         ...rec,
       };
     } catch (error) {
-      log.warn(`macros.execute call failed for ${macroId}: ${errorMessage(error)}`);
+      log.warn("macros.execute call failed");
       return {
         status: "error",
         error: errorMessage(error),
