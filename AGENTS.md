@@ -185,3 +185,9 @@ Windows state belongs under `%LOCALAPPDATA%\\Nocturne\\Connector`; the per-user 
 - `package.json` in `src/` is the source of truth for the runtime stack. The repo root has no `package.json` — keep it that way; the runtime IS the `src/` subtree.
 
 Legacy OTA download bytes stream into a unique partial file and replace the completed package only after EOF/Content-Length verification. The live legacy RPC path awaits streamed MD5 hashing; the synchronous compatibility method reads bounded chunks. Both OTA implementations share `server/utils/file-io.ts` for partial-write handling. Bluetooth refresh/scan failures must remain visible without erasing previously known device/auth state. Expected missing optional files may fall back; unexpected I/O errors must be logged. Client WebSocket subscribers are isolated so one thrown callback cannot prevent delivery to the rest.
+
+Sprint 12 support reports use an allowlisted, bounded schema for both status and
+export routes. Never recursively copy native host metadata or include raw logs,
+pairing codes, credentials, app definitions, or macro parameters. Preserve health
+and counts when optional data is truncated. Sidecar readiness must be checked
+independently of its retained stable port, including in main-thread window dispatch.

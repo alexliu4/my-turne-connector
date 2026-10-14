@@ -209,6 +209,11 @@ impl HostState {
     }
 
     pub fn show_window(app: &AppHandle) -> Result<(), String> {
+        let port = app
+            .try_state::<HostState>()
+            .and_then(|state| sidecar::ready_port(&state.sidecar_ready, &state.sidecar_port))
+            .ok_or_else(|| "Connector server is still starting".to_string())?;
+
         if let Some(window) = app.get_webview_window("main") {
             window.show().map_err(|error| error.to_string())?;
             window.unminimize().map_err(|error| error.to_string())?;
@@ -216,10 +221,6 @@ impl HostState {
             return Ok(());
         }
 
-        let port = app
-            .try_state::<HostState>()
-            .and_then(|state| state.sidecar_port.lock().ok().and_then(|port| *port))
-            .ok_or_else(|| "Connector server is still starting".to_string())?;
         let url = connector_window_url(port);
         WebviewWindowBuilder::new(
             app,

@@ -82,12 +82,7 @@ pub fn supervise(
                 restart_delay.as_secs()
             ));
             // Quit remains responsive during backoff.
-            for _ in 0..restart_delay.as_millis() / 100 {
-                if shutting_down.load(Ordering::Acquire) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(100));
-            }
+            wait_for_restart(restart_delay, &shutting_down);
             restart_delay = next_restart_delay(restart_delay);
         }
     });
@@ -95,6 +90,24 @@ pub fn supervise(
 
 fn next_restart_delay(delay: Duration) -> Duration {
     (delay * 2).min(Duration::from_secs(30))
+}
+
+// The port is retained solely to request the same bind address after a restart.
+// It is never evidence that the current sidecar is serving HTTP.
+pub fn ready_port(ready: &AtomicBool, port: &Mutex<Option<u16>>) -> Option<u16> {
+    let port = port.lock().ok()?;
+    ready.load(Ordering::Acquire).then_some(*port).flatten()
+}
+
+fn wait_for_restart(delay: Duration, shutting_down: &AtomicBool) {
+    let deadline = Instant::now() + delay;
+    while !shutting_down.load(Ordering::Acquire) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
 }
 
 pub fn stop(shutting_down: &AtomicBool, child_slot: &ChildSlot) {
@@ -117,6 +130,7 @@ fn spawn_once(
     child_slot: &ChildSlot,
     shutting_down: &AtomicBool,
 ) -> Result<i32, String> {
+    ready.store(false, Ordering::Release);
     let requested_port = port.lock().ok().and_then(|current_port| *current_port);
     let executable = server_executable();
     let mut command = if executable.exists() {
@@ -154,6 +168,17 @@ fn spawn_once(
         command.creation_flags(0x08000000);
     }
 
+    run_child(command, port, ready, child_slot, shutting_down)
+}
+
+fn run_child(
+    mut command: Command,
+    port: &Arc<Mutex<Option<u16>>>,
+    ready: &Arc<AtomicBool>,
+    child_slot: &ChildSlot,
+    shutting_down: &AtomicBool,
+) -> Result<i32, String> {
+    ready.store(false, Ordering::Release);
     let mut child = command.spawn().map_err(|error| {
         crate::logging::write(&format!(
             "Sidecar process creation failed os_code={:?}; check OS security history",
@@ -353,6 +378,107 @@ mod recovery_tests {
         assert!(!ready.load(Ordering::Acquire));
         assert_eq!(*port.lock().unwrap(), Some(1000));
     }
+    fn fixture_command() -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "sidecar::recovery_tests::sidecar_process_fixture",
+                "--nocapture",
+            ])
+            .env("NOCTURNE_SIDECAR_TEST_FIXTURE", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture, invoked only by the lifecycle test"]
+    fn sidecar_process_fixture() {
+        assert_eq!(
+            std::env::var("NOCTURNE_SIDECAR_TEST_FIXTURE").as_deref(),
+            Ok("1")
+        );
+        thread::sleep(Duration::from_millis(200));
+        println!("NOCTURNE_READY_PORT=43210");
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    #[test]
+    fn exit_failed_replacement_and_delayed_success_keep_port_separate_from_readiness() {
+        let port = Arc::new(Mutex::new(Some(43210)));
+        let ready = Arc::new(AtomicBool::new(true));
+        let slot: ChildSlot = Arc::new(Mutex::new(None));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        assert!(run_child(
+            Command::new("nocturne-nonexistent-sidecar-test"),
+            &port,
+            &ready,
+            &slot,
+            &shutdown
+        )
+        .is_err());
+        assert_eq!(*port.lock().unwrap(), Some(43210));
+        assert_eq!(ready_port(&ready, &port), None);
+        for _ in 0..2 {
+            let (process_port, process_ready, process_slot, process_shutdown) =
+                (port.clone(), ready.clone(), slot.clone(), shutdown.clone());
+            let process = thread::spawn(move || {
+                run_child(
+                    fixture_command(),
+                    &process_port,
+                    &process_ready,
+                    &process_slot,
+                    &process_shutdown,
+                )
+            });
+            thread::sleep(Duration::from_millis(50));
+            assert_eq!(ready_port(&ready, &port), None);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while ready_port(&ready, &port).is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(ready_port(&ready, &port), Some(43210));
+            assert_eq!(process.join().unwrap(), Ok(0));
+            assert_eq!(ready_port(&ready, &port), None);
+            assert_eq!(*port.lock().unwrap(), Some(43210));
+        }
+    }
+
+    #[test]
+    fn stale_stdout_cannot_change_replacement_port_or_readiness() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let old = ReadinessLease {
+            active: Arc::new(Mutex::new(true)),
+            ready: ready.clone(),
+        };
+        let stale_reader = old.active.clone();
+        let port = Mutex::new(Some(1234));
+        drop(old);
+        let current = ReadinessLease {
+            active: Arc::new(Mutex::new(true)),
+            ready: ready.clone(),
+        };
+        publish_ready(&stale_reader, &ready, &port, 9999);
+        assert_eq!(ready_port(&ready, &port), None);
+        publish_ready(&current.active, &ready, &port, 1234);
+        publish_ready(&stale_reader, &ready, &port, 9999);
+        assert_eq!(ready_port(&ready, &port), Some(1234));
+    }
+
+    #[test]
+    fn shutdown_interrupts_restart_backoff() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let waiting = shutdown.clone();
+        let worker = thread::spawn(move || wait_for_restart(Duration::from_secs(30), &waiting));
+        thread::sleep(Duration::from_millis(20));
+        let started = Instant::now();
+        stop(&shutdown, &Arc::new(Mutex::new(None)));
+        worker.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
     #[test]
     fn restart_backoff_is_capped() {
         let mut delay = Duration::from_secs(1);
