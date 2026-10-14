@@ -1,3 +1,4 @@
+import { markFeatureProbeFailure } from "./feature-probe-result";
 import { createLogger } from "../utils/logger";
 import type { HostBridgeClient } from "../platform/host-bridge";
 
@@ -24,8 +25,6 @@ export interface DiscordStatus {
  * - No high-frequency polling loop is created. Probes occur on startup and explicit UI/RPC status queries.
  */
 export class DiscordService {
-  /** Transport/probe failure, independent of cached availability. */
-  statusProbeFailed = false;
 
   private isRunning = false;
 
@@ -63,12 +62,12 @@ export class DiscordService {
     try {
       const response = await this.callHostWithTimeout("discord.get_status", {});
       const rec = asRecord(response);
-      this.statusProbeFailed = !rec || typeof rec.status !== "string";
+      const probeFailed = !rec || typeof rec.status !== "string";
       const running = rec?.running === true || rec?.available === true;
       this.isRunning = running;
 
       if (!rec || rec.status !== "ok") {
-        return {
+        return markFeatureProbeFailure({
           status: (rec?.status as string) ?? "unsupported",
           available: running,
           running,
@@ -76,7 +75,7 @@ export class DiscordService {
           muted: null,
           deafened: null,
           message: typeof rec?.message === "string" ? rec.message : undefined,
-        };
+        }, probeFailed);
       }
 
       return {
@@ -88,17 +87,16 @@ export class DiscordService {
         deafened: null,
       };
     } catch (error) {
-      this.statusProbeFailed = true;
       log.warn(`discord.get_status call failed: ${errorMessage(error)}`);
       this.isRunning = false;
-      return {
+      return markFeatureProbeFailure({
         status: "unsupported",
         available: false,
         running: false,
         state_known: false,
         muted: null,
         deafened: null,
-      };
+      });
     }
   }
 

@@ -1,3 +1,4 @@
+import { markFeatureProbeFailure } from "./feature-probe-result";
 import { createLogger } from "../utils/logger";
 import type { HostBridgeClient } from "../platform/host-bridge";
 import {
@@ -28,8 +29,6 @@ export interface AppLaunchResult {
  * To ensure remote execution safety, launch operations validate strictly against locally configured application definitions.
  */
 export class AppLaunchService {
-  /** Transport/probe failure, independent of cached availability. */
-  statusProbeFailed = false;
 
   private isHostVerified = false;
 
@@ -63,7 +62,7 @@ export class AppLaunchService {
     try {
       const response = await this.callHostWithTimeout("app_launch.get_status", {});
       const rec = asRecord(response);
-      this.statusProbeFailed = !rec || typeof rec.status !== "string";
+      const probeFailed = !rec || typeof rec.status !== "string";
       const available = rec?.status === "ok" && rec?.available === true;
       this.isHostVerified = available;
 
@@ -71,12 +70,12 @@ export class AppLaunchService {
       const configuredApps = Object.values(config.apps).filter((app) => app.enabled !== false);
 
       if (!rec || rec.status !== "ok") {
-        return {
+        return markFeatureProbeFailure({
           status: typeof rec?.status === "string" ? rec.status : "unsupported",
           available: false,
           apps: [],
           message: typeof rec?.message === "string" ? rec.message : undefined,
-        };
+        }, probeFailed);
       }
 
       return {
@@ -85,15 +84,14 @@ export class AppLaunchService {
         apps: configuredApps,
       };
     } catch (error) {
-      this.statusProbeFailed = true;
       log.warn(`app_launch.get_status call failed: ${errorMessage(error)}`);
       this.isHostVerified = false;
-      return {
+      return markFeatureProbeFailure({
         status: "unsupported",
         available: false,
         apps: [],
         message: errorMessage(error),
-      };
+      });
     }
   }
 

@@ -1,3 +1,4 @@
+import { didFeatureProbeFail } from "./services/feature-probe-result";
 import { RPCClient, type RPCClientDelegate } from "./rpc/rpc-client";
 import {
   SpotifyService,
@@ -1588,7 +1589,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     const probe = async (
       name: keyof ConnectorCapabilities,
       run: () => Promise<unknown>,
-      failed: () => boolean = () => false,
+      failed: (result: unknown) => boolean = didFeatureProbeFail,
     ) => {
       this.hostProbeOutcomes[name] = "pending";
       try {
@@ -1597,7 +1598,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
           result && typeof result === "object" && "status" in result
             ? result.status
             : null;
-        this.hostProbeOutcomes[name] = failed()
+        this.hostProbeOutcomes[name] = failed(result)
           ? "error"
           : result === null ||
               (typeof result === "object" &&
@@ -1621,7 +1622,6 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         probe(
           "discord",
           () => this.discordService!.getStatus(),
-          () => this.discordService!.statusProbeFailed,
         ),
       );
     if (this.systemStatsService)
@@ -1629,7 +1629,6 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         probe(
           "systemStats",
           () => this.systemStatsService!.getStats(),
-          () => this.systemStatsService!.statusProbeFailed,
         ),
       );
     if (this.appLaunchService)
@@ -1637,7 +1636,6 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         probe(
           "appLaunch",
           () => this.appLaunchService!.getStatus(),
-          () => this.appLaunchService!.statusProbeFailed,
         ),
       );
     if (this.macroService)
@@ -1645,17 +1643,21 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         probe(
           "macros",
           () => this.macroService!.getStatus(),
-          () => this.macroService!.statusProbeFailed,
         ),
       );
-    if (this.systemMediaService)
+    if (this.systemMediaService) {
+      let volumeFailed = false;
       promises.push(
         probe(
           "volume",
-          () => this.systemMediaService!.getVolume({ timeoutMs: 2_000 }),
-          () => this.systemMediaService!.volumeProbeFailed,
+          () => this.systemMediaService!.getVolume({
+            timeoutMs: 2_000,
+            onProbeFailure: failed => { volumeFailed = failed; },
+          }),
+          () => volumeFailed,
         ),
       );
+    }
     await Promise.allSettled(promises);
     return this.getHostStatus();
   }

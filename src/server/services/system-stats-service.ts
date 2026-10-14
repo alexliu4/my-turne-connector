@@ -1,3 +1,4 @@
+import { markFeatureProbeFailure } from "./feature-probe-result";
 import { createLogger } from "../utils/logger";
 import type { HostBridgeClient } from "../platform/host-bridge";
 
@@ -22,8 +23,6 @@ interface CachedSystemStats {
 }
 
 export class SystemStatsService {
-  /** Transport/probe failure, independent of cached availability. */
-  statusProbeFailed = false;
 
   private cache: CachedSystemStats | null = null;
   private isHostVerified = false;
@@ -72,7 +71,7 @@ export class SystemStatsService {
     try {
       const response = await this.callHostWithTimeout("system_stats.get", {});
       const rec = asRecord(response);
-      this.statusProbeFailed = !rec || typeof rec.status !== "string";
+      const probeFailed = !rec || typeof rec.status !== "string";
 
       if (!rec || rec.status !== "ok") {
         this.isHostVerified = false;
@@ -86,7 +85,7 @@ export class SystemStatsService {
           gpu_percent: null,
           message: typeof rec?.message === "string" ? rec.message : undefined,
         };
-        return fallback;
+        return markFeatureProbeFailure(fallback, probeFailed);
       }
 
       const cpu = typeof rec.cpu_percent === "number" ? rec.cpu_percent : null;
@@ -117,7 +116,6 @@ export class SystemStatsService {
 
       return stats;
     } catch (error) {
-      this.statusProbeFailed = true;
       log.warn(`system_stats.get call failed: ${errorMessage(error)}`);
       this.isHostVerified = false;
       const fallback: SystemStats = {
@@ -130,7 +128,7 @@ export class SystemStatsService {
         gpu_percent: null,
         message: errorMessage(error),
       };
-      return fallback;
+      return markFeatureProbeFailure(fallback);
     }
   }
 
