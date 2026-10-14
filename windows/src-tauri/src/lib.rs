@@ -2,6 +2,7 @@
 
 mod bridge;
 mod host;
+mod logging;
 mod native;
 mod sidecar;
 
@@ -24,6 +25,10 @@ fn quit_connector(app: tauri::AppHandle) {
 }
 
 pub fn run() {
+    logging::write(concat!(
+        "Native host starting version=",
+        env!("CARGO_PKG_VERSION")
+    ));
     let open_initial_window = requests_window(std::env::args_os());
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -42,7 +47,7 @@ pub fn run() {
             app.manage(state.clone());
             HostState::enable_autostart(app.handle());
             state.install_tray(app)?;
-            state.start_services();
+            state.start_services(app.handle().clone());
             if open_initial_window || HostState::take_early_window_request() {
                 HostState::request_window(app.handle());
             }

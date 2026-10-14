@@ -2,9 +2,6 @@ use crate::bridge::BridgeServer;
 use base64::Engine as _;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
-use std::path::PathBuf;
 use std::sync::mpsc::{sync_channel, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -1914,23 +1911,7 @@ fn startup_winsock() -> Result<(), String> {
 }
 
 fn log_native(message: &str) {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nocturne")
-        .join("Connector")
-        .join("logs");
-    if fs::create_dir_all(&base).is_err() {
-        return;
-    }
-    let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(base.join("host.log"))
-    else {
-        return;
-    };
-    let _ = writeln!(file, "{message}");
+    crate::logging::write(message);
 }
 
 fn device_json(info: &BLUETOOTH_DEVICE_INFO) -> Value {

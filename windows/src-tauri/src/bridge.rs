@@ -1,10 +1,7 @@
 use rmp_serde::{from_slice, to_vec_named};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::fs::{self, OpenOptions};
 use std::io;
-use std::io::Write as _;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use thiserror::Error;
@@ -199,21 +196,7 @@ impl BridgeServer {
                         generation = request.generation;
                     }
                     let authorized = request.token == *self.token && request.generation == generation;
-                    log_bridge(&format!(
-                        "Bridge request received method={} authenticated={} request_generation={} expected_generation={generation}",
-                        request.method,
-                        authenticated,
-                        request.generation,
-                    ));
-                    if !authorized {
-                        log_bridge(&format!(
-                            "Rejected bridge request method={} authenticated={} token_matches={} request_generation={} expected_generation={generation}",
-                            request.method,
-                            authenticated,
-                            request.token == *self.token,
-                            request.generation,
-                        ));
-                    }
+                    log_bridge(if authorized { "Authorized bridge request received" } else { "Rejected bridge request" });
                     if !authorized {
                         let response = self.dispatch(request, generation).await;
                         if let Err(error) = write_frame(&mut writer, &response).await {
@@ -232,9 +215,8 @@ impl BridgeServer {
                     let bridge = self.clone();
                     let responses = responses.clone();
                     tokio::spawn(async move {
-                        let method = request.method.clone();
                         let response = bridge.dispatch(request, generation).await;
-                        log_bridge(&format!("Bridge request completed method={method}"));
+                        log_bridge("Bridge request completed");
                         let _ = responses.send(response);
                     });
                 }
@@ -327,23 +309,7 @@ impl BridgeServer {
 }
 
 fn log_bridge(message: &str) {
-    let base = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("Nocturne")
-        .join("Connector")
-        .join("logs");
-    if fs::create_dir_all(&base).is_err() {
-        return;
-    }
-    let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(base.join("host.log"))
-    else {
-        return;
-    };
-    let _ = writeln!(file, "{message}");
+    crate::logging::write(message);
 }
 
 #[cfg(windows)]

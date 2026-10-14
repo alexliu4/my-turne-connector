@@ -1,3 +1,5 @@
+import { STALE_RFCOMM_RECOVERY_EXIT_CODE } from "./utils/sidecar-startup";
+import { didFeatureProbeFail } from "./services/feature-probe-result";
 import { RPCClient, type RPCClientDelegate } from "./rpc/rpc-client";
 import {
   SpotifyService,
@@ -55,6 +57,17 @@ export interface ConnectorCapabilities {
   macros: boolean;
   appLaunch: boolean;
 }
+
+export type FeatureProbeOutcome =
+  | "complete"
+  | "unavailable"
+  | "error"
+  | "pending"
+  | "not_probed";
+export type FeatureProbeOutcomes = Record<
+  keyof ConnectorCapabilities,
+  FeatureProbeOutcome
+>;
 
 export interface HostStatus {
   platform: string;
@@ -618,7 +631,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
             this.keepAliveFailures.delete(id);
             log.warn(`Resetting stale outbound RFCOMM route for ${address}`);
             log.warn("Restarting the Windows connector sidecar to release the stale RFCOMM route");
-            setTimeout(() => process.exit(75), 0);
+            setTimeout(() => process.exit(STALE_RFCOMM_RECOVERY_EXIT_CODE), 0);
             return;
           }
         }
@@ -1560,23 +1573,90 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     return true;
   }
 
+  private hostProbeOutcomes: FeatureProbeOutcomes = {
+    volume: "not_probed",
+    media: "not_probed",
+    discord: "not_probed",
+    systemStats: "not_probed",
+    appLaunch: "not_probed",
+    macros: "not_probed",
+  };
+
+  getHostProbeOutcomes(): FeatureProbeOutcomes {
+    return { ...this.hostProbeOutcomes };
+  }
+
   async refreshHostStatus(): Promise<HostStatus> {
-    const promises: Array<Promise<unknown>> = [];
-    if (this.discordService) {
-      promises.push(this.discordService.getStatus().catch(() => null));
-    }
-    if (this.systemStatsService) {
-      promises.push(this.systemStatsService.getStats().catch(() => null));
-    }
-    if (this.appLaunchService) {
-      promises.push(this.appLaunchService.getStatus().catch(() => null));
-    }
-    if (this.macroService) {
-      promises.push(this.macroService.getStatus().catch(() => null));
-    }
-    if (this.systemMediaService) {
+    const probe = async (
+      name: keyof ConnectorCapabilities,
+      run: () => Promise<unknown>,
+      failed: (result: unknown) => boolean = didFeatureProbeFail,
+    ) => {
+      this.hostProbeOutcomes[name] = "pending";
+      try {
+        const result = await run();
+        const status =
+          result && typeof result === "object" && "status" in result
+            ? result.status
+            : null;
+        this.hostProbeOutcomes[name] = failed(result)
+          ? "error"
+          : result === null ||
+              (typeof result === "object" &&
+                "available" in result &&
+                result.available === false &&
+                status === "ok") ||
+              status === "unsupported" ||
+              status === "disabled" ||
+              status === "unavailable"
+            ? "unavailable"
+            : status !== null && status !== "ok"
+              ? "error"
+              : "complete";
+      } catch {
+        this.hostProbeOutcomes[name] = "error";
+      }
+    };
+    const promises: Promise<void>[] = [];
+    if (this.discordService)
       promises.push(
-        this.systemMediaService.getVolume({ timeoutMs: 2_000 }).catch(() => null),
+        probe(
+          "discord",
+          () => this.discordService!.getStatus(),
+        ),
+      );
+    if (this.systemStatsService)
+      promises.push(
+        probe(
+          "systemStats",
+          () => this.systemStatsService!.getStats(),
+        ),
+      );
+    if (this.appLaunchService)
+      promises.push(
+        probe(
+          "appLaunch",
+          () => this.appLaunchService!.getStatus(),
+        ),
+      );
+    if (this.macroService)
+      promises.push(
+        probe(
+          "macros",
+          () => this.macroService!.getStatus(),
+        ),
+      );
+    if (this.systemMediaService) {
+      let volumeFailed = false;
+      promises.push(
+        probe(
+          "volume",
+          () => this.systemMediaService!.getVolume({
+            timeoutMs: 2_000,
+            onProbeFailure: failed => { volumeFailed = failed; },
+          }),
+          () => volumeFailed,
+        ),
       );
     }
     await Promise.allSettled(promises);

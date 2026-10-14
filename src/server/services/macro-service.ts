@@ -1,3 +1,4 @@
+import { markFeatureProbeFailure } from "./feature-probe-result";
 import { createLogger } from "../utils/logger";
 import type { HostBridgeClient } from "../platform/host-bridge";
 import {
@@ -32,6 +33,7 @@ export interface MacroResult {
  * Execution is restricted strictly to explicitly configured macro IDs stored in user configuration.
  */
 export class MacroService {
+
   private isHostVerified = false;
 
   constructor(
@@ -65,6 +67,7 @@ export class MacroService {
     try {
       const response = await this.callHostWithTimeout("macros.get_status", {});
       const rec = asRecord(response);
+      const probeFailed = !rec || typeof rec.status !== "string";
       const available = rec?.status === "ok" && rec?.available === true;
       this.isHostVerified = available;
 
@@ -72,12 +75,12 @@ export class MacroService {
       const configuredMacros = Object.values(config.macros).filter((m) => m.enabled !== false);
 
       if (!rec || rec.status !== "ok") {
-        return {
+        return markFeatureProbeFailure({
           status: typeof rec?.status === "string" ? rec.status : "unsupported",
           available: false,
           macros: [],
           message: typeof rec?.message === "string" ? rec.message : undefined,
-        };
+        }, probeFailed);
       }
 
       return {
@@ -88,12 +91,12 @@ export class MacroService {
     } catch (error) {
       log.warn(`macros.get_status call failed: ${errorMessage(error)}`);
       this.isHostVerified = false;
-      return {
+      return markFeatureProbeFailure({
         status: "unsupported",
         available: false,
         macros: [],
         message: errorMessage(error),
-      };
+      });
     }
   }
 
@@ -174,7 +177,7 @@ export class MacroService {
         ...rec,
       };
     } catch (error) {
-      log.warn(`macros.execute call failed for ${macroId}: ${errorMessage(error)}`);
+      log.warn("macros.execute call failed");
       return {
         status: "error",
         error: errorMessage(error),

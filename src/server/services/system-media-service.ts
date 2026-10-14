@@ -145,6 +145,7 @@ class FileSystemMediaPreferenceStore implements SystemMediaPreferenceStore {
 }
 
 export class SystemMediaService {
+
   private readonly unsubscribe: Array<() => void> = [];
   private readonly pendingDeliveries = new Set<Promise<void>>();
   private latestMetadataDelivery: {
@@ -258,16 +259,18 @@ export class SystemMediaService {
     await this.hostBridge.call("media.set_spotify_linked", { linked });
   }
 
-  async getVolume(options?: { timeoutMs?: number }): Promise<{ volume_percent: number; muted: boolean } | null> {
+  async getVolume(options?: { timeoutMs?: number; onProbeFailure?: (failed: boolean) => void }): Promise<{ volume_percent: number; muted: boolean } | null> {
     let response: unknown;
     try {
       const callOptions = options?.timeoutMs ? { timeoutMs: options.timeoutMs } : {};
       response = await this.hostBridge.call<unknown>("volume.get", {}, callOptions);
     } catch (error) {
+      options?.onProbeFailure?.(true);
       this.volumeSupported = false;
       throw error;
     }
     const rec = asRecord(response);
+    options?.onProbeFailure?.(!rec || (typeof rec.status === "string" && !["ok", "unsupported", "disabled", "unavailable"].includes(rec.status)));
     if (!rec || rec.status === "unsupported") {
       if (rec?.status === "unsupported") this.volumeRevision++;
       this.volumeSupported = false;
@@ -275,6 +278,7 @@ export class SystemMediaService {
     }
     const volume_percent = normalizeVolumePercent(rec.volume_percent ?? rec.volumePercent);
     if (volume_percent === null) {
+      options?.onProbeFailure?.(rec.status !== "disabled" && rec.status !== "unavailable");
       this.volumeSupported = false;
       return null;
     }

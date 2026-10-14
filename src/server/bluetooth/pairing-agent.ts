@@ -90,23 +90,23 @@ export class PairingAgent {
           log.info("Agent released");
         }
         RequestPinCode(_device: string) {
-          log.info(`PIN requested for ${_device}, returning 0000`);
+          log.info(`PIN requested for ${_device}`);
           return "0000";
         }
-        DisplayPinCode(devicePath: string, pincode: string) {
-          log.info(`PIN code for ${devicePath}: ${pincode}`);
+        DisplayPinCode(devicePath: string, _pincode: string) {
+          log.info(`PIN display requested for ${devicePath}`);
         }
         RequestPasskey(_device: string) {
           log.info(`Passkey requested for ${_device}`);
           return 0;
         }
-        DisplayPasskey(devicePath: string, passkey: number, _entered: number) {
-          log.info(`Passkey for ${devicePath}: ${passkey}`);
+        DisplayPasskey(devicePath: string, _passkey: number, _entered: number) {
+          log.info(`Passkey display requested for ${devicePath}`);
         }
         RequestConfirmation(devicePath: string, passkey: number) {
           const address = agent.devicePathToAddress(devicePath);
           const pin = String(passkey).padStart(6, "0");
-          log.info(`RequestConfirmation: ${pin} for device: ${devicePath}`);
+          log.info(`Pairing confirmation requested for device: ${devicePath}`);
 
           return new Promise<void>((resolve, reject) => {
             agent.pendingResolve = resolve;

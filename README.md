@@ -126,6 +126,15 @@ GitHub Actions workflows run on `windows-latest` runners:
 - **Triggers**: Pushes to `main`, pull requests targeting `main`, or manual `workflow_dispatch`.
 - **Inspecting Runs**: Open the **Actions** tab on GitHub, select the appropriate workflow run for your commit or pull request, and view execution logs or download build artifacts.
 
+### Windows maintenance
+
+Use Settings → Connection Diagnostics for a bounded, redacted support export.
+The tray's **Open Diagnostic Logs** action works even when the sidecar UI is
+unavailable. Logs rotate at five MiB per file with four archives per writer.
+See [Windows recovery](docs/windows-recovery.md) for restart, reinstall, rollback,
+and real-device verification, and [Sprint 12 contract](docs/sprint-12-maintenance.md)
+for health/report limits. Windows self-updates remain unsupported.
+
 ## Updating
 
 Connector images use an A/B root partition layout. The boot partition runs U-Boot, which selects either root slot A or B and rolls back to the previous slot if a new slot fails to boot twice.

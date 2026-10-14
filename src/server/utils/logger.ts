@@ -1,10 +1,9 @@
-import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "fs";
+import { appendRotatingLog, boundedLogLine, redactLogText } from "./log-storage";
 import { join } from "path";
 import { CONNECTOR_STATE_DIR } from "../config";
 
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 } as const;
 type LogLevel = keyof typeof LOG_LEVELS;
-const LOG_FILE_MAX_BYTES = 5 * 1024 * 1024;
 const logFile =
   process.platform === "win32"
     ? join(CONNECTOR_STATE_DIR, "logs", "connector.log")
@@ -40,27 +39,17 @@ let logWriteFailureReported = false;
 function writeRotatingLog(line: string): void {
   if (!logFile) return;
   try {
-    const directory = join(CONNECTOR_STATE_DIR, "logs");
-    if (!existsSync(directory)) mkdirSync(directory, { recursive: true });
-    if (existsSync(logFile) && statSync(logFile).size >= LOG_FILE_MAX_BYTES) {
-      for (let index = 3; index >= 1; index--) {
-        const source = `${logFile}.${index}`;
-        const destination = `${logFile}.${index + 1}`;
-        if (existsSync(source)) renameSync(source, destination);
-      }
-      renameSync(logFile, `${logFile}.1`);
-    }
-    appendFileSync(logFile, `${line}\n`, { encoding: "utf8" });
+    appendRotatingLog(logFile, line);
     logWriteFailureReported = false;
-  } catch (error) {
+  } catch {
     if (!logWriteFailureReported) {
       logWriteFailureReported = true;
-      console.error("Unable to write the Connector log file:", error);
+      console.error("Unable to write the Connector log file");
     }
   }
 }
 
-function formatLine(level: LogLevel, category: string, msg: string, args: unknown[]): string {
+function formatLine(level: LogLevel, category: string, msg: string, args: unknown[], osErrorCode?: unknown): string {
   const suffix = args.length
     ? ` ${args.map((arg) => {
         try {
@@ -70,29 +59,37 @@ function formatLine(level: LogLevel, category: string, msg: string, args: unknow
         }
       }).join(" ")}`
     : "";
-  return `[${timestamp()}] [${level.toUpperCase()}] [${category}] ${msg}${suffix}`;
+  return boundedLogLine(`[${timestamp()}] [${level.toUpperCase()}] [${redactLogText(category)}] ${redactLogText(msg + suffix, osErrorCode)}`).toString("utf8").trimEnd();
 }
 
 export function createLogger(category: string) {
   return {
+    // Callers supply a numeric errno from the OS, never a parsed log payload.
+    errorOsCode(msg: string, code: unknown) {
+      if (!shouldLog("error")) return;
+      const line = formatLine("error", category, msg, [], code);
+      console.error(line);
+      writeRotatingLog(line);
+      pushRecentLog(line);
+    },
     debug(msg: string, ...args: unknown[]) {
       if (shouldLog("debug")) {
         const line = formatLine("debug", category, msg, args);
-        console.debug(`[${timestamp()}] [DEBUG] [${category}] ${msg}`, ...args);
+        console.debug(line);
         writeRotatingLog(line);
       }
     },
     info(msg: string, ...args: unknown[]) {
       if (shouldLog("info")) {
         const line = formatLine("info", category, msg, args);
-        console.info(`[${timestamp()}] [INFO] [${category}] ${msg}`, ...args);
+        console.info(line);
         writeRotatingLog(line);
       }
     },
     warn(msg: string, ...args: unknown[]) {
       if (shouldLog("warn")) {
         const line = formatLine("warn", category, msg, args);
-        console.warn(`[${timestamp()}] [WARN] [${category}] ${msg}`, ...args);
+        console.warn(line);
         writeRotatingLog(line);
         pushRecentLog(line);
       }
@@ -100,7 +97,7 @@ export function createLogger(category: string) {
     error(msg: string, ...args: unknown[]) {
       if (shouldLog("error")) {
         const line = formatLine("error", category, msg, args);
-        console.error(`[${timestamp()}] [ERROR] [${category}] ${msg}`, ...args);
+        console.error(line);
         writeRotatingLog(line);
         pushRecentLog(line);
       }

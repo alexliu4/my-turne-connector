@@ -94,6 +94,8 @@ interface DiagnosticsReport {
   carThingDevices: Array<{ id: string; deviceInfo: any }>;
   hostStatus: any;
   recentLogs: string[];
+  health?: { featureProbe: string; sidecar: string };
+  build?: { arch: string; runtime: string };
 }
 
 function formatBytes(bytes: number | null | undefined): string {
@@ -465,6 +467,9 @@ export function Settings() {
                   ["Connector Version", diagnostics?.version ?? info?.version ?? "Unknown"],
                   ["Platform", diagnostics?.connectorPlatform ?? diagnostics?.platform ?? "Unknown"],
                   ["Connected Devices", `${diagnostics?.carThingDevices?.length ?? 0} device(s)`],
+                  ["Sidecar", diagnostics?.health?.sidecar ?? "Unknown"],
+                  ["Feature Probe", diagnostics?.health?.featureProbe ?? "Unknown"],
+                  ["Runtime", diagnostics?.build?.runtime ?? "Unknown"],
                 ].map(([label, value]) => (
                   <div key={label} className="flex items-center justify-between rounded-lg bg-bg px-3 py-2.5">
                     <span className="text-sm text-secondary">{label}</span>

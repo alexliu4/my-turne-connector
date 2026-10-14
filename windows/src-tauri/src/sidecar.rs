@@ -6,14 +6,76 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::bridge::BridgeServer;
+
+// Must match server/utils/sidecar-startup.ts. Code 75 is a normal RFCOMM recovery restart.
+const HTTP_ADDRESS_IN_USE_EXIT_CODE: i32 = 76;
 
 pub struct ManagedChild {
     child: Child,
     #[cfg(windows)]
     job: JobObject,
+}
+
+// A reader from an exited attempt must never announce replacement readiness.
+struct ReadinessLease {
+    active: Arc<Mutex<bool>>,
+    ready: Arc<AtomicBool>,
+}
+
+impl Drop for ReadinessLease {
+    fn drop(&mut self) {
+        if let Ok(mut active) = self.active.lock() {
+            *active = false;
+            self.ready.store(false, Ordering::Release);
+        }
+    }
+}
+
+fn publish_ready(
+    active: &Mutex<bool>,
+    ready: &AtomicBool,
+    port: &Mutex<Option<u16>>,
+    value: u16,
+    ephemeral: Option<&AtomicBool>,
+) -> bool {
+    let Ok(active) = active.lock() else {
+        return false;
+    };
+    if !*active || value == 0 {
+        return false;
+    }
+    if let Ok(mut target) = port.lock() {
+        *target = Some(value);
+        if let Some(ephemeral) = ephemeral {
+            ephemeral.store(false, Ordering::Release);
+        }
+        ready.store(true, Ordering::Release);
+        crate::logging::write("Sidecar HTTP ready");
+        return true;
+    }
+    false
+}
+
+fn requested_port(port: &Mutex<Option<u16>>, ephemeral: &AtomicBool) -> Option<u16> {
+    if ephemeral.load(Ordering::Acquire) {
+        None
+    } else {
+        port.lock().ok().and_then(|value| *value)
+    }
+}
+
+fn mark_port_collision(active: &Mutex<bool>, ready: &AtomicBool, ephemeral: &AtomicBool) {
+    if let Ok(active) = active.lock() {
+        if *active && !ready.load(Ordering::Acquire) {
+            ephemeral.store(true, Ordering::Release);
+            crate::logging::write(
+                "Sidecar HTTP address in use; next launch requests an ephemeral port",
+            );
+        }
+    }
 }
 
 pub type ChildSlot = Arc<Mutex<Option<ManagedChild>>>;
@@ -24,18 +86,31 @@ pub fn supervise(
     ready: Arc<AtomicBool>,
     shutting_down: Arc<AtomicBool>,
     child_slot: ChildSlot,
+    on_ready: Arc<dyn Fn() + Send + Sync>,
 ) {
     thread::spawn(move || {
+        let ephemeral = Arc::new(AtomicBool::new(false));
         let mut restart_delay = Duration::from_secs(1);
         while !shutting_down.load(Ordering::Acquire) {
             ready.store(false, Ordering::Release);
-            match spawn_once(&bridge, &port, &ready, &child_slot) {
+            let started = Instant::now();
+            crate::logging::write("Sidecar launch attempt");
+            match spawn_once(
+                &bridge,
+                &port,
+                &ready,
+                &child_slot,
+                &shutting_down,
+                &ephemeral,
+                &on_ready,
+            ) {
                 Ok(status) => {
                     eprintln!("Nocturne Connector server exited with {status}");
-                    restart_delay = Duration::from_secs(1);
+                    crate::logging::write(&format!("Sidecar exited code={status}"));
                 }
                 Err(error) => {
                     eprintln!("Nocturne Connector server failed to start: {error}");
+                    crate::logging::write("Sidecar failed to start or exited unsuccessfully; check installation and OS security history");
                 }
             }
             ready.store(false, Ordering::Release);
@@ -44,14 +119,45 @@ pub fn supervise(
             if shutting_down.load(Ordering::Acquire) {
                 break;
             }
-            thread::sleep(restart_delay);
-            restart_delay = (restart_delay * 2).min(Duration::from_secs(30));
+            if started.elapsed() >= Duration::from_secs(60) {
+                restart_delay = Duration::from_secs(1);
+            }
+            crate::logging::write(&format!(
+                "Sidecar restart scheduled delay_seconds={}",
+                restart_delay.as_secs()
+            ));
+            // Quit remains responsive during backoff.
+            wait_for_restart(restart_delay, &shutting_down);
+            restart_delay = next_restart_delay(restart_delay);
         }
     });
 }
 
+fn next_restart_delay(delay: Duration) -> Duration {
+    (delay * 2).min(Duration::from_secs(30))
+}
+
+// The port is retained solely to request the same bind address after a restart.
+// It is never evidence that the current sidecar is serving HTTP.
+pub fn ready_port(ready: &AtomicBool, port: &Mutex<Option<u16>>) -> Option<u16> {
+    let port = port.lock().ok()?;
+    ready.load(Ordering::Acquire).then_some(*port).flatten()
+}
+
+fn wait_for_restart(delay: Duration, shutting_down: &AtomicBool) {
+    let deadline = Instant::now() + delay;
+    while !shutting_down.load(Ordering::Acquire) {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(remaining.min(Duration::from_millis(100)));
+    }
+}
+
 pub fn stop(shutting_down: &AtomicBool, child_slot: &ChildSlot) {
     shutting_down.store(true, Ordering::Release);
+    crate::logging::write("Native host shutdown requested");
     if let Ok(mut child) = child_slot.lock() {
         if let Some(process) = child.as_mut() {
             #[cfg(windows)]
@@ -67,14 +173,21 @@ fn spawn_once(
     port: &Arc<Mutex<Option<u16>>>,
     ready: &Arc<AtomicBool>,
     child_slot: &ChildSlot,
+    shutting_down: &AtomicBool,
+    ephemeral: &Arc<AtomicBool>,
+    on_ready: &Arc<dyn Fn() + Send + Sync>,
 ) -> Result<i32, String> {
-    let requested_port = port.lock().ok().and_then(|current_port| *current_port);
+    ready.store(false, Ordering::Release);
+    let requested_port = requested_port(port, ephemeral);
     let executable = server_executable();
     let mut command = if executable.exists() {
         Command::new(executable)
     } else if let Ok(fallback) = std::env::var("NOCTURNE_SERVER_COMMAND") {
         Command::new(fallback)
     } else {
+        crate::logging::write(
+            "Sidecar executable missing; reinstall the complete Windows artifact",
+        );
         return Err(format!(
             "server executable does not exist: {}",
             executable.display()
@@ -102,7 +215,34 @@ fn spawn_once(
         command.creation_flags(0x08000000);
     }
 
-    let mut child = command.spawn().map_err(|error| error.to_string())?;
+    run_child(
+        command,
+        port,
+        ready,
+        child_slot,
+        shutting_down,
+        ephemeral,
+        on_ready,
+    )
+}
+
+fn run_child(
+    mut command: Command,
+    port: &Arc<Mutex<Option<u16>>>,
+    ready: &Arc<AtomicBool>,
+    child_slot: &ChildSlot,
+    shutting_down: &AtomicBool,
+    ephemeral: &Arc<AtomicBool>,
+    on_ready: &Arc<dyn Fn() + Send + Sync>,
+) -> Result<i32, String> {
+    ready.store(false, Ordering::Release);
+    let mut child = command.spawn().map_err(|error| {
+        crate::logging::write(&format!(
+            "Sidecar process creation failed os_code={:?}; check OS security history",
+            error.raw_os_error()
+        ));
+        error.to_string()
+    })?;
     #[cfg(windows)]
     let job = match JobObject::new(&child) {
         Ok(job) => job,
@@ -113,18 +253,27 @@ fn spawn_once(
     };
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
+    let lease = ReadinessLease {
+        active: Arc::new(Mutex::new(true)),
+        ready: Arc::clone(ready),
+    };
     if let Some(stdout) = stdout {
+        let active = Arc::clone(&lease.active);
         let port = Arc::clone(port);
         let ready = Arc::clone(ready);
+        let ephemeral = Arc::clone(ephemeral);
+        let on_ready = Arc::clone(on_ready);
         thread::spawn(move || {
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 if let Some(value) = line.strip_prefix("NOCTURNE_READY_PORT=") {
                     if let Ok(value) = value.trim().parse::<u16>() {
-                        if let Ok(mut target) = port.lock() {
-                            *target = Some(value);
-                            ready.store(true, Ordering::Release);
+                        if publish_ready(&active, &ready, &port, value, Some(&ephemeral)) {
+                            on_ready();
                         }
                     }
+                }
+                if line == "NOCTURNE_STARTUP_ERROR=HTTP_ADDRESS_IN_USE" {
+                    mark_port_collision(&active, &ready, &ephemeral);
                 }
                 eprintln!("[connector] {line}");
             }
@@ -142,6 +291,12 @@ fn spawn_once(
         let mut slot = child_slot
             .lock()
             .map_err(|_| "child slot is poisoned".to_string())?;
+        if shutting_down.load(Ordering::Acquire) {
+            #[cfg(windows)]
+            job.terminate();
+            let _ = child.kill();
+            return Err("shutdown requested during sidecar startup".to_string());
+        }
         *slot = Some(ManagedChild {
             child,
             #[cfg(windows)]
@@ -169,6 +324,16 @@ fn spawn_once(
     if let Ok(mut slot) = child_slot.lock() {
         *slot = None;
     }
+    // Exit classification also works when the reader has not drained stdout yet.
+    if status.code() == Some(HTTP_ADDRESS_IN_USE_EXIT_CODE) {
+        mark_port_collision(&lease.active, ready, ephemeral);
+    }
+    drop(lease);
+    crate::logging::write(&format!(
+        "Sidecar process ended exit_code={:?} success={}",
+        status.code(),
+        status.success()
+    ));
     if status.success() {
         Ok(status.code().unwrap_or(0))
     } else {
@@ -259,5 +424,264 @@ impl Drop for JobObject {
                 self.0 as *mut std::ffi::c_void,
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod recovery_tests {
+    use super::*;
+    #[test]
+    fn stale_reader_cannot_publish_readiness() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let lease = ReadinessLease {
+            active: Arc::new(Mutex::new(true)),
+            ready: Arc::clone(&ready),
+        };
+        let active = Arc::clone(&lease.active);
+        let port = Mutex::new(None);
+        publish_ready(&active, &ready, &port, 1000, None);
+        assert!(ready.load(Ordering::Acquire));
+        drop(lease);
+        publish_ready(&active, &ready, &port, 2000, None);
+        assert!(!ready.load(Ordering::Acquire));
+        assert_eq!(*port.lock().unwrap(), Some(1000));
+    }
+    fn noop_ready_callback() -> Arc<dyn Fn() + Send + Sync> {
+        Arc::new(|| {})
+    }
+    fn fixture_command() -> Command {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--ignored",
+                "--exact",
+                "sidecar::recovery_tests::sidecar_process_fixture",
+                "--nocapture",
+            ])
+            .env("NOCTURNE_SIDECAR_TEST_FIXTURE", "1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command
+    }
+
+    #[test]
+    #[ignore = "subprocess fixture, invoked only by the lifecycle test"]
+    fn sidecar_process_fixture() {
+        assert_eq!(
+            std::env::var("NOCTURNE_SIDECAR_TEST_FIXTURE").as_deref(),
+            Ok("1")
+        );
+        match std::env::var("NOCTURNE_SIDECAR_TEST_EXIT").as_deref() {
+            Ok("collision") => std::process::exit(HTTP_ADDRESS_IN_USE_EXIT_CODE),
+            Ok("bluetooth_recovery") => std::process::exit(75),
+            Ok("unrelated") => std::process::exit(2),
+            _ => {}
+        }
+        thread::sleep(Duration::from_millis(200));
+        let port = std::env::var("NOCTURNE_SIDECAR_TEST_PORT").unwrap_or_else(|_| "43210".into());
+        println!("NOCTURNE_READY_PORT={port}");
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    #[test]
+    fn exit_failed_replacement_and_delayed_success_keep_port_separate_from_readiness() {
+        let port = Arc::new(Mutex::new(Some(43210)));
+        let ready = Arc::new(AtomicBool::new(true));
+        let slot: ChildSlot = Arc::new(Mutex::new(None));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        assert!(run_child(
+            Command::new("nocturne-nonexistent-sidecar-test"),
+            &port,
+            &ready,
+            &slot,
+            &shutdown,
+            &Arc::new(AtomicBool::new(false)),
+            &noop_ready_callback()
+        )
+        .is_err());
+        assert_eq!(*port.lock().unwrap(), Some(43210));
+        assert_eq!(ready_port(&ready, &port), None);
+        for _ in 0..2 {
+            let (process_port, process_ready, process_slot, process_shutdown) =
+                (port.clone(), ready.clone(), slot.clone(), shutdown.clone());
+            let process = thread::spawn(move || {
+                run_child(
+                    fixture_command(),
+                    &process_port,
+                    &process_ready,
+                    &process_slot,
+                    &process_shutdown,
+                    &Arc::new(AtomicBool::new(false)),
+                    &noop_ready_callback(),
+                )
+            });
+            thread::sleep(Duration::from_millis(50));
+            assert_eq!(ready_port(&ready, &port), None);
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while ready_port(&ready, &port).is_none() && Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(ready_port(&ready, &port), Some(43210));
+            assert_eq!(process.join().unwrap(), Ok(0));
+            assert_eq!(ready_port(&ready, &port), None);
+            assert_eq!(*port.lock().unwrap(), Some(43210));
+        }
+    }
+
+    #[test]
+    fn stale_stdout_cannot_change_replacement_port_or_readiness() {
+        let ready = Arc::new(AtomicBool::new(false));
+        let old = ReadinessLease {
+            active: Arc::new(Mutex::new(true)),
+            ready: ready.clone(),
+        };
+        let stale_reader = old.active.clone();
+        let port = Mutex::new(Some(1234));
+        drop(old);
+        let current = ReadinessLease {
+            active: Arc::new(Mutex::new(true)),
+            ready: ready.clone(),
+        };
+        publish_ready(&stale_reader, &ready, &port, 9999, None);
+        assert_eq!(ready_port(&ready, &port), None);
+        publish_ready(&current.active, &ready, &port, 1234, None);
+        publish_ready(&stale_reader, &ready, &port, 9999, None);
+        assert_eq!(ready_port(&ready, &port), Some(1234));
+    }
+
+    #[test]
+    fn stale_rfcomm_recovery_exit_keeps_retained_http_port() {
+        let port = Arc::new(Mutex::new(Some(43210)));
+        let ready = Arc::new(AtomicBool::new(true));
+        let slot = Arc::new(Mutex::new(None));
+        let shutdown = AtomicBool::new(false);
+        let ephemeral = Arc::new(AtomicBool::new(false));
+        let mut recovery = fixture_command();
+        recovery.env("NOCTURNE_SIDECAR_TEST_EXIT", "bluetooth_recovery");
+        assert!(run_child(
+            recovery,
+            &port,
+            &ready,
+            &slot,
+            &shutdown,
+            &ephemeral,
+            &noop_ready_callback()
+        )
+        .is_err());
+        assert_eq!(ready_port(&ready, &port), None);
+        assert_eq!(*port.lock().unwrap(), Some(43210));
+        assert_eq!(requested_port(&port, &ephemeral), Some(43210));
+        assert!(!ephemeral.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn confirmed_bind_exit_recovers_but_unrelated_failures_keep_stable_port() {
+        let port = Arc::new(Mutex::new(Some(43210)));
+        let ready = Arc::new(AtomicBool::new(false));
+        let slot = Arc::new(Mutex::new(None));
+        let shutdown = AtomicBool::new(false);
+        let ephemeral = Arc::new(AtomicBool::new(false));
+        let mut unrelated = fixture_command();
+        unrelated.env("NOCTURNE_SIDECAR_TEST_EXIT", "unrelated");
+        assert!(run_child(
+            unrelated,
+            &port,
+            &ready,
+            &slot,
+            &shutdown,
+            &ephemeral,
+            &noop_ready_callback()
+        )
+        .is_err());
+        assert_eq!(requested_port(&port, &ephemeral), Some(43210));
+        let mut collision = fixture_command();
+        collision.env("NOCTURNE_SIDECAR_TEST_EXIT", "collision");
+        assert!(run_child(
+            collision,
+            &port,
+            &ready,
+            &slot,
+            &shutdown,
+            &ephemeral,
+            &noop_ready_callback()
+        )
+        .is_err());
+        assert_eq!(requested_port(&port, &ephemeral), None);
+        assert_eq!(ready_port(&ready, &port), None);
+        let mut replacement = fixture_command();
+        replacement.env("NOCTURNE_SIDECAR_TEST_PORT", "54321");
+        assert_eq!(
+            run_child(
+                replacement,
+                &port,
+                &ready,
+                &slot,
+                &shutdown,
+                &ephemeral,
+                &noop_ready_callback()
+            ),
+            Ok(0)
+        );
+        assert_eq!(*port.lock().unwrap(), Some(54321));
+        assert_eq!(requested_port(&port, &ephemeral), Some(54321));
+    }
+
+    #[test]
+    fn collision_recovery_retains_old_port_until_current_readiness() {
+        let port = Mutex::new(Some(43210));
+        let ready = Arc::new(AtomicBool::new(false));
+        let ephemeral = AtomicBool::new(false);
+        let lease = ReadinessLease {
+            active: Arc::new(Mutex::new(true)),
+            ready: ready.clone(),
+        };
+        assert_eq!(requested_port(&port, &ephemeral), Some(43210));
+        mark_port_collision(&lease.active, &ready, &ephemeral);
+        assert_eq!(requested_port(&port, &ephemeral), None);
+        assert_eq!(*port.lock().unwrap(), Some(43210));
+        assert!(publish_ready(
+            &lease.active,
+            &ready,
+            &port,
+            54321,
+            Some(&ephemeral)
+        ));
+        assert_eq!(ready_port(&ready, &port), Some(54321));
+        assert_eq!(requested_port(&port, &ephemeral), Some(54321));
+        let stale = lease.active.clone();
+        drop(lease);
+        mark_port_collision(&stale, &ready, &ephemeral);
+        assert_eq!(requested_port(&port, &ephemeral), Some(54321));
+        assert!(!publish_ready(
+            &stale,
+            &ready,
+            &port,
+            9999,
+            Some(&ephemeral)
+        ));
+        assert_eq!(*port.lock().unwrap(), Some(54321));
+    }
+
+    #[test]
+    fn shutdown_interrupts_restart_backoff() {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let waiting = shutdown.clone();
+        let worker = thread::spawn(move || wait_for_restart(Duration::from_secs(30), &waiting));
+        thread::sleep(Duration::from_millis(20));
+        let started = Instant::now();
+        stop(&shutdown, &Arc::new(Mutex::new(None)));
+        worker.join().unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn restart_backoff_is_capped() {
+        let mut delay = Duration::from_secs(1);
+        let mut values = Vec::new();
+        for _ in 0..8 {
+            values.push(delay.as_secs());
+            delay = next_restart_delay(delay);
+        }
+        assert_eq!(values, [1, 2, 4, 8, 16, 30, 30, 30]);
     }
 }

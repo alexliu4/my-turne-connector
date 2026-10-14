@@ -204,7 +204,7 @@ export class BluetoothService {
       await this.adapter.setPairable(true);
 
       this.agent.setOnPinDisplay((event) => {
-        log.info(`PIN display: ${event.address} (${event.name}) pin=${event.pin}`);
+        log.info(`PIN display requested for ${event.address}`);
         this.emit("agent", event);
       });
       this.agent.setOnPairingCancelled((error) => {

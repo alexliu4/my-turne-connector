@@ -1,30 +1,39 @@
 import { describe, expect, it } from "bun:test";
-import {
-  redactSensitiveText,
-  redactValue,
-} from "./diagnostics-service";
+import { redactSensitiveText, redactValue } from "./diagnostics-service";
 
 describe("DiagnosticsService & Redaction Logic", () => {
   it("redacts sensitive Windows user file paths", () => {
-    const input = "Error opening file at C:\\Users\\alexl\\AppData\\Local\\Nocturne\\secret.json";
+    const input =
+      "Error opening file at C:\\Users\\alexl\\AppData\\Local\\Nocturne\\secret.json";
     const redacted = redactSensitiveText(input);
-    expect(redacted).toBe("Error opening file at C:\\Users\\[REDACTED]\\AppData\\Local\\Nocturne\\secret.json");
+    expect(redacted).toBe(
+      "Error opening file at C:\\Users\\[REDACTED]\\AppData\\Local\\Nocturne\\secret.json",
+    );
   });
 
   it("redacts sensitive POSIX user file paths", () => {
     const inputPosixHome = "Failed reading /home/alexl/config.json";
-    expect(redactSensitiveText(inputPosixHome)).toBe("Failed reading /home/[REDACTED]/config.json");
+    expect(redactSensitiveText(inputPosixHome)).toBe(
+      "Failed reading /home/[REDACTED]/config.json",
+    );
 
     const inputMacUsers = "Failed reading /Users/alexl/config.json";
-    expect(redactSensitiveText(inputMacUsers)).toBe("Failed reading /Users/[REDACTED]/config.json");
+    expect(redactSensitiveText(inputMacUsers)).toBe(
+      "Failed reading /Users/[REDACTED]/config.json",
+    );
   });
 
   it("redacts bearer tokens and key-value query secrets", () => {
-    const inputBearer = "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret";
-    expect(redactSensitiveText(inputBearer)).toBe("Authorization: Bearer [REDACTED]");
+    const inputBearer =
+      "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.secret";
+    expect(redactSensitiveText(inputBearer)).toBe(
+      "Authorization: Bearer [REDACTED]",
+    );
 
     const inputParam = "http://example.com/api?token=supersecret123&user=john";
-    expect(redactSensitiveText(inputParam)).toBe("http://example.com/api?token=[REDACTED]&user=john");
+    expect(redactSensitiveText(inputParam)).toBe(
+      "http://example.com/api?token=[REDACTED]&user=john",
+    );
   });
 
   it("recursively redacts nested object properties with sensitive keys", () => {
@@ -47,4 +56,250 @@ describe("DiagnosticsService & Redaction Logic", () => {
     expect(redacted.user.nested.api_key).toBe("[REDACTED]");
     expect(redacted.user.nested.path).toBe("C:\\Users\\[REDACTED]\\file.txt");
   });
+});
+
+import { DiagnosticsService } from "./diagnostics-service";
+
+function fakeManager(refresh: () => Promise<unknown>, connected = false) {
+  return {
+    refreshHostStatus: refresh,
+    getHostStatus: () => ({ services: { volume: { available: false } } }),
+    getConnectionStatus: () => ({
+      connected: true,
+      deviceCount: 1,
+      devices: [{ deviceInfo: { device: "Car Thing", version: "1.0" } }],
+    }),
+    isHostBridgeConnected: () => connected,
+  } as unknown as ConstructorParameters<typeof DiagnosticsService>[0];
+}
+
+it("returns cached health within the deadline and shares an in-flight probe", async () => {
+  let calls = 0;
+  let finish!: () => void;
+  const service = new DiagnosticsService(
+    fakeManager(() => {
+      calls++;
+      return new Promise<void>((resolve) => {
+        finish = resolve;
+      });
+    }),
+    10,
+  );
+  const reports = await Promise.all([
+    service.getDiagnostics(),
+    service.getRedactedExport(),
+  ]);
+  expect(calls).toBe(1);
+  for (const report of reports) {
+    expect(report.health).toMatchObject({
+      nativeHost: "unavailable",
+      sidecar: "ready",
+      bluetoothRoute: "connected",
+      featureProbe: "timeout",
+    });
+  }
+  await service.getDiagnostics();
+  expect(calls).toBe(1);
+  finish();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await service.getDiagnostics();
+  expect(calls).toBe(2);
+  finish();
+});
+
+it("reports probe failure independently of route and native connectivity", async () => {
+  const service = new DiagnosticsService(
+    fakeManager(async () => {
+      throw new Error("secret");
+    }, true),
+  );
+  const report = await service.getDiagnostics();
+  expect(report.health).toMatchObject({
+    nativeHost: "connected",
+    bluetoothRoute: "connected",
+    featureProbe: "error",
+  });
+  expect(JSON.stringify(report)).not.toContain("secret");
+});
+
+import {
+  supportReport,
+  serializeDiagnosticsExport,
+  MAX_DIAGNOSTICS_EXPORT_BYTES,
+} from "./diagnostics-service";
+
+it("bounds large collections and ignores arbitrarily deep, secret-bearing host metadata", () => {
+  let nested: unknown = {
+    token: "deep-secret",
+    code: "987654",
+    params: { command: "macro-secret" },
+  };
+  for (let i = 0; i < 20_000; i++) nested = { nested };
+  const input = {
+    version: "2.1.4",
+    hostBridgeConnected: true,
+    carThingDeviceCount: 100_000,
+    carThingDevices: Array.from({ length: 100_000 }, () => ({
+      deviceType: "private-host-name",
+      firmwareVersion: "1.2.3",
+    })),
+    hostStatus: {
+      services: { volume: { available: true, nested }, arbitrary: nested },
+      nested,
+    },
+    health: {
+      nativeHost: "connected",
+      featureProbe: "complete",
+      features: { volume: true, arbitrary: nested },
+    },
+    recentLogs: ["raw-log-secret", "Recent ERROR entries: 2"],
+  };
+  const report = supportReport(input);
+  expect(report.truncated).toBe(true);
+  expect(report.devicesTruncated).toBe(true);
+  expect(report.carThingDevices).toHaveLength(32);
+  expect(report.carThingDeviceCount).toBe(100_000);
+  expect(report.hostStatus?.services.volume.available).toBe(true);
+  const json = serializeDiagnosticsExport(input);
+  expect(Buffer.byteLength(json)).toBeLessThan(MAX_DIAGNOSTICS_EXPORT_BYTES);
+  for (const secret of [
+    "deep-secret",
+    "987654",
+    "macro-secret",
+    "private-host-name",
+    "raw-log-secret",
+    "arbitrary",
+  ])
+    expect(json).not.toContain(secret);
+});
+
+it("drops oversized and secret-bearing optional strings while retaining health", () => {
+  const json = serializeDiagnosticsExport({
+    version: "2.1.4",
+    sidecarReadiness: true,
+    carThingDevices: [
+      {
+        firmwareVersion: "x".repeat(10_000_000),
+        deviceType: "Bearer opaque-secret",
+      },
+      { firmwareVersion: "1.2.3-opaque-secret" },
+      { firmwareVersion: { pin: "987654" } },
+    ],
+    hostStatus: {
+      services: {
+        media: {
+          available: true,
+          source: "opaque-secret",
+          params: { command: "opaque-secret" },
+        },
+      },
+    },
+    recentLogs: ["pairingCode=987654", "Bearer opaque-secret"],
+    health: {
+      nativeHost: "unavailable",
+      featureProbe: "timeout",
+      features: { media: true },
+    },
+  });
+  expect(Buffer.byteLength(json)).toBeLessThan(MAX_DIAGNOSTICS_EXPORT_BYTES);
+  for (const secret of ["opaque-secret", "987654", "params"])
+    expect(json).not.toContain(secret);
+  const report = JSON.parse(json);
+  expect(report.truncated).toBe(true);
+  expect(report.health.featureProbe).toBe("timeout");
+  expect(report.carThingDevices[1].firmwareVersion).toBe("1.2.3");
+});
+
+it("bounds generic redaction depth, collection sizes, strings, and cycles", () => {
+  const cycle: Record<string, unknown> = {};
+  cycle.self = cycle;
+  const json = JSON.stringify(
+    redactValue({
+      cycle,
+      items: Array.from({ length: 10_000 }, () => ({
+        message: "x".repeat(10_000),
+        password: "secret",
+      })),
+    }),
+  );
+  expect(json).toContain("[TRUNCATED]");
+  expect(json).not.toContain("secret");
+  expect(json.length).toBeLessThan(32_000);
+});
+
+it("repeated deadlines never replace an unresolved refresh; settlement permits recovery", async () => {
+  let calls = 0;
+  let finish!: () => void;
+  const manager = fakeManager(() => {
+    calls++;
+    return new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+  });
+  const cached = manager.getHostStatus();
+  manager.getHostStatus = () => ({
+    ...cached,
+    services: {
+      ...cached.services,
+      volume: { ...cached.services.volume, available: true },
+    },
+  });
+  const service = new DiagnosticsService(manager, 2);
+  for (let i = 0; i < 4; i++) {
+    const reports = await Promise.all(
+      Array.from({ length: 10 }, () => service.getDiagnostics()),
+    );
+    expect(
+      reports.every((report) => report.health?.featureProbe === "timeout"),
+    ).toBe(true);
+    expect(calls).toBe(1);
+    expect(
+      reports.every((report) => report.health?.features.volume === true),
+    ).toBe(true);
+  }
+  finish();
+  await Bun.sleep(0);
+  const request = service.getDiagnostics();
+  await Bun.sleep(0);
+  finish();
+  expect((await request).health?.featureProbe).toBe("complete");
+  expect(calls).toBe(2);
+});
+
+it("status and export allowlist the same outcomes independently of cached availability", async () => {
+  const manager = {
+    ...fakeManager(async () => {}),
+    getHostProbeOutcomes: () => ({
+      volume: "error",
+      discord: "unavailable",
+      systemStats: "complete",
+      params: { token: "private-value" },
+    }),
+  };
+  const service = new DiagnosticsService(manager);
+  for (const report of [
+    await service.getDiagnostics(),
+    await service.getRedactedExport(),
+  ]) {
+    expect(report.health?.featureProbe).toBe("complete");
+    expect(report.health?.featureOutcomes?.volume).toBe("error");
+    expect(report.health?.featureOutcomes?.discord).toBe("unavailable");
+    expect(report.health?.features.volume).toBe(false);
+    expect(JSON.stringify(report)).not.toContain("private-value");
+    expect(Object.keys(report.health?.featureOutcomes ?? {})).toHaveLength(6);
+  }
+});
+
+it("a canceled and settled refresh releases single flight for a new request", async () => {
+  let calls = 0;
+  const service = new DiagnosticsService(
+    fakeManager(async () => {
+      if (++calls === 1) throw new DOMException("private-value", "AbortError");
+    }),
+  );
+  expect((await service.getDiagnostics()).health?.featureProbe).toBe("error");
+  expect((await service.getDiagnostics()).health?.featureProbe).toBe(
+    "complete",
+  );
+  expect(calls).toBe(2);
 });
