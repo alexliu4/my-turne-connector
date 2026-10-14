@@ -86,8 +86,9 @@ separately; physical recovery acceptance remains pending.
 
 A confirmed Windows HTTP EADDRINUSE startup failure emits the fixed
 NOCTURNE_STARTUP_ERROR=HTTP_ADDRESS_IN_USE signal and exits with reserved code
-75. The existing supervisor then requests PORT=0 until the current process
-announces readiness. All other startup failures retain normal retry behavior;
+76. Code 75 remains reserved for intentional stale RFCOMM recovery and retains
+the stable HTTP port. After a confirmed bind collision, the existing supervisor
+requests PORT=0 until the current process announces readiness. All other startup failures retain normal retry behavior;
 the remembered port changes only on current-process readiness. That readiness
 notification also navigates an existing local WebView to the new loopback URL
 when its port changed, without opening or focusing a new window. No additional

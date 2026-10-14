@@ -1,4 +1,7 @@
-import { sidecarBindFailure } from "./utils/sidecar-startup";
+import {
+  sidecarBindFailure,
+  HTTP_ADDRESS_IN_USE_EXIT_CODE,
+} from "./utils/sidecar-startup";
 import { hasErrorCode } from "./utils/errors";
 import { Elysia } from "elysia";
 import { cors } from "@elysiajs/cors";
@@ -249,7 +252,7 @@ async function main() {
     );
     const signal = sidecarBindFailure(error);
     if (windowsHost && process.env.NOCTURNE_HOST_PIPE && signal) {
-      process.exitCode = 75; // Reserved for a confirmed HTTP address-in-use startup failure.
+      process.exitCode = HTTP_ADDRESS_IN_USE_EXIT_CODE; // Reserved for a confirmed HTTP address-in-use startup failure.
       process.stdout.write(signal);
     }
     throw error;
@@ -286,5 +289,9 @@ async function runOnlineInit(manager: NocturneManager): Promise<void> {
 
 main().catch((err) => {
   log.error(`Fatal error: ${err}`);
-  process.exit(process.exitCode === 75 ? 75 : 1);
+  process.exit(
+    process.exitCode === HTTP_ADDRESS_IN_USE_EXIT_CODE
+      ? HTTP_ADDRESS_IN_USE_EXIT_CODE
+      : 1,
+  );
 });

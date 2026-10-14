@@ -1,5 +1,9 @@
 import { test, expect } from "bun:test";
-import { sidecarBindFailure } from "./sidecar-startup";
+import {
+  sidecarBindFailure,
+  HTTP_ADDRESS_IN_USE_EXIT_CODE,
+  STALE_RFCOMM_RECOVERY_EXIT_CODE,
+} from "./sidecar-startup";
 
 test("classifies only actual address-in-use errors from HTTP listen", () => {
   const server = Bun.serve({
@@ -31,4 +35,12 @@ test("classifies only actual address-in-use errors from HTTP listen", () => {
   } finally {
     server.stop(true);
   }
+});
+
+test("HTTP bind collisions cannot reuse the intentional Bluetooth recovery exit code", () => {
+  expect(STALE_RFCOMM_RECOVERY_EXIT_CODE).toBe(75);
+  expect(HTTP_ADDRESS_IN_USE_EXIT_CODE).toBe(76);
+  expect(HTTP_ADDRESS_IN_USE_EXIT_CODE).not.toBe(
+    STALE_RFCOMM_RECOVERY_EXIT_CODE,
+  );
 });

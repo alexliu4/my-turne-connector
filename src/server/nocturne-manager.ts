@@ -1,3 +1,4 @@
+import { STALE_RFCOMM_RECOVERY_EXIT_CODE } from "./utils/sidecar-startup";
 import { didFeatureProbeFail } from "./services/feature-probe-result";
 import { RPCClient, type RPCClientDelegate } from "./rpc/rpc-client";
 import {
@@ -630,7 +631,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
             this.keepAliveFailures.delete(id);
             log.warn(`Resetting stale outbound RFCOMM route for ${address}`);
             log.warn("Restarting the Windows connector sidecar to release the stale RFCOMM route");
-            setTimeout(() => process.exit(75), 0);
+            setTimeout(() => process.exit(STALE_RFCOMM_RECOVERY_EXIT_CODE), 0);
             return;
           }
         }

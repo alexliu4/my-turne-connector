@@ -10,6 +10,9 @@ use std::time::{Duration, Instant};
 
 use crate::bridge::BridgeServer;
 
+// Must match server/utils/sidecar-startup.ts. Code 75 is a normal RFCOMM recovery restart.
+const HTTP_ADDRESS_IN_USE_EXIT_CODE: i32 = 76;
+
 pub struct ManagedChild {
     child: Child,
     #[cfg(windows)]
@@ -322,7 +325,7 @@ fn run_child(
         *slot = None;
     }
     // Exit classification also works when the reader has not drained stdout yet.
-    if status.code() == Some(75) {
+    if status.code() == Some(HTTP_ADDRESS_IN_USE_EXIT_CODE) {
         mark_port_collision(&lease.active, ready, ephemeral);
     }
     drop(lease);
@@ -469,7 +472,8 @@ mod recovery_tests {
             Ok("1")
         );
         match std::env::var("NOCTURNE_SIDECAR_TEST_EXIT").as_deref() {
-            Ok("collision") => std::process::exit(75),
+            Ok("collision") => std::process::exit(HTTP_ADDRESS_IN_USE_EXIT_CODE),
+            Ok("bluetooth_recovery") => std::process::exit(75),
             Ok("unrelated") => std::process::exit(2),
             _ => {}
         }
@@ -543,6 +547,31 @@ mod recovery_tests {
         publish_ready(&current.active, &ready, &port, 1234, None);
         publish_ready(&stale_reader, &ready, &port, 9999, None);
         assert_eq!(ready_port(&ready, &port), Some(1234));
+    }
+
+    #[test]
+    fn stale_rfcomm_recovery_exit_keeps_retained_http_port() {
+        let port = Arc::new(Mutex::new(Some(43210)));
+        let ready = Arc::new(AtomicBool::new(true));
+        let slot = Arc::new(Mutex::new(None));
+        let shutdown = AtomicBool::new(false);
+        let ephemeral = Arc::new(AtomicBool::new(false));
+        let mut recovery = fixture_command();
+        recovery.env("NOCTURNE_SIDECAR_TEST_EXIT", "bluetooth_recovery");
+        assert!(run_child(
+            recovery,
+            &port,
+            &ready,
+            &slot,
+            &shutdown,
+            &ephemeral,
+            &noop_ready_callback()
+        )
+        .is_err());
+        assert_eq!(ready_port(&ready, &port), None);
+        assert_eq!(*port.lock().unwrap(), Some(43210));
+        assert_eq!(requested_port(&port, &ephemeral), Some(43210));
+        assert!(!ephemeral.load(Ordering::Acquire));
     }
 
     #[test]
