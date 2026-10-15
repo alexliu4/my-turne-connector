@@ -6,6 +6,7 @@ import {
 } from "./windows-session-service";
 import type { HostBridgeClient } from "../platform/host-bridge";
 import { NocturneManager } from "../nocturne-manager";
+import { createUnavailableBluetoothService } from "./bluetooth-service";
 
 class FakeHostBridge implements HostBridgeClient {
   private handlers = new Map<string, (data: any) => void>();
@@ -277,6 +278,7 @@ describe("WindowsSessionService & Integration", () => {
       platform: "win32",
       hostBridge: bridge,
       windowsSessionService: service,
+      bluetoothService: createUnavailableBluetoothService(),
     });
 
     const res = await manager.onCall("1", "windows.session.get_status", {});
@@ -312,6 +314,7 @@ describe("WindowsSessionService & Integration", () => {
 
     const manager = new NocturneManager({
       platform: "darwin",
+      bluetoothService: createUnavailableBluetoothService(),
     });
 
     const res = await manager.onCall("1", "windows.session.get_status", {});
