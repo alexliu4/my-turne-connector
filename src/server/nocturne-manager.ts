@@ -605,7 +605,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     if (this.platform === "win32") {
       appReadyPayload.connectorPlatform = "windows";
       appReadyPayload.windowsSession =
-        await this.windowsSessionService?.refreshState() ?? defaultWindowsSessionState();
+        this.windowsSessionService?.currentState ?? defaultWindowsSessionState();
     }
 
     appReadyPayload.capabilities = this.getCapabilities();

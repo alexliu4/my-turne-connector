@@ -49,7 +49,18 @@ jobs:
 
       - name: Install NSIS
         run: |
-          choco install nsis --no-progress
+          if (-not (Get-Command makensis -ErrorAction SilentlyContinue)) {
+            $installed = $false
+            for ($i = 1; $i -le 5; $i++) {
+              choco install nsis --no-progress -y
+              if ($LASTEXITCODE -eq 0) { $installed = $true; break }
+              Write-Host "choco install nsis failed (attempt $i), retrying in 10s..."
+              Start-Sleep -Seconds 10
+            }
+            if (-not $installed) {
+              throw "Failed to install NSIS via Chocolatey after 5 attempts"
+            }
+          }
 
       - name: Build frontend and Bun server sidecar
         env:
