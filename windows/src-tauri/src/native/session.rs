@@ -92,29 +92,28 @@ impl SessionStateTracker {
         query: Option<(String, String)>,
         resumed: bool,
     ) -> Option<WindowsSessionState> {
-        let status = self.get_status();
+        let mut status = self.state.lock().unwrap();
         let (session, active) = if status.session_monitoring {
             query.unwrap_or_else(|| ("unknown".into(), "unknown".into()))
         } else {
             ("unknown".into(), "unknown".into())
         };
-        self.update(
+        let system = if status.system_power_monitoring {
+            if resumed || status.system_power == "unknown" {
+                "awake".to_string()
+            } else {
+                status.system_power.clone()
+            }
+        } else {
+            "unknown".to_string()
+        };
+        let clear_display = resumed || !status.display_power_monitoring;
+        Self::update_locked(
+            &mut status,
             Some(&session),
             Some(&active),
-            Some(if status.system_power_monitoring {
-                if resumed || status.system_power == "unknown" {
-                    "awake"
-                } else {
-                    &status.system_power
-                }
-            } else {
-                "unknown"
-            }),
-            if resumed || !status.display_power_monitoring {
-                Some("unknown")
-            } else {
-                None
-            },
+            Some(&system),
+            if clear_display { Some("unknown") } else { None },
         )
     }
 
@@ -125,8 +124,22 @@ impl SessionStateTracker {
         system_power: Option<&str>,
         display_power: Option<&str>,
     ) -> Option<WindowsSessionState> {
-        let mut guard = self.state.lock().unwrap();
+        Self::update_locked(
+            &mut self.state.lock().unwrap(),
+            session,
+            active_session,
+            system_power,
+            display_power,
+        )
+    }
 
+    fn update_locked(
+        guard: &mut WindowsSessionState,
+        session: Option<&str>,
+        active_session: Option<&str>,
+        system_power: Option<&str>,
+        display_power: Option<&str>,
+    ) -> Option<WindowsSessionState> {
         let new_session = session
             .map(|s| s.to_string())
             .unwrap_or_else(|| guard.session.clone());
