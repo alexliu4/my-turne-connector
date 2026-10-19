@@ -2,6 +2,7 @@ import type { HostBridgeClient } from "../platform/host-bridge";
 import { createLogger } from "../utils/logger";
 
 const log = createLogger("WindowsSessionService");
+const MAX_RETIRED_OBSERVERS = 16;
 
 export interface WindowsSessionState {
   session: "locked" | "unlocked" | "unknown";
@@ -10,6 +11,10 @@ export interface WindowsSessionState {
   displayPower: "on" | "off" | "dimmed" | "unknown";
   observedAt: number;
   sequence: number;
+  observerId: string;
+  sessionMonitoring: boolean;
+  displayPowerMonitoring: boolean;
+  systemPowerMonitoring: boolean;
 }
 
 export function defaultWindowsSessionState(): WindowsSessionState {
@@ -20,11 +25,19 @@ export function defaultWindowsSessionState(): WindowsSessionState {
     displayPower: "unknown",
     observedAt: Date.now(),
     sequence: 0,
+    observerId: "",
+    sessionMonitoring: false,
+    displayPowerMonitoring: false,
+    systemPowerMonitoring: false,
   };
 }
 
 export class WindowsSessionService {
   private current: WindowsSessionState = defaultWindowsSessionState();
+  private refreshPromise: Promise<WindowsSessionState> | null = null;
+  private accepted: WindowsSessionState | null = null;
+  private readonly retiredObservers = new Set<string>();
+  private revision = 0;
   private unbindEvent: (() => void) | null = null;
   private readonly listeners = new Set<(state: WindowsSessionState) => void>();
 
@@ -58,18 +71,26 @@ export class WindowsSessionService {
       return this.currentState;
     }
 
-    try {
-      const raw = await this.hostBridge.call<unknown>(
-        "windows.session.get_status",
-        {},
-        { timeoutMs: 2_000 },
-      );
-      this.updateState(raw);
-    } catch (err) {
-      log.warn(`Failed to fetch native Windows session status: ${err}`);
-    }
-
-    return this.currentState;
+    if (this.refreshPromise) return this.refreshPromise;
+    const revision = this.revision;
+    this.refreshPromise = (async () => {
+      try {
+        const raw = await this.hostBridge!.call<unknown>(
+          "windows.session.get_status", {}, { timeoutMs: 2_000 },
+        );
+        if (!normalizeWindowsSessionState(raw)) throw new Error("Invalid session snapshot");
+        this.updateState(raw, true);
+      } catch (err) {
+        log.warn(`Failed to fetch native Windows session status: ${err}`);
+        // A failed older request must not erase a newer event.
+        if (this.revision === revision) {
+          this.publish({ ...defaultWindowsSessionState(),
+            observerId: this.current.observerId, sequence: this.current.sequence });
+        }
+      }
+      return this.currentState;
+    })().finally(() => { this.refreshPromise = null; });
+    return this.refreshPromise;
   }
 
   onSessionChanged(listener: (state: WindowsSessionState) => void): () => void {
@@ -80,23 +101,46 @@ export class WindowsSessionService {
   }
 
   private handleNativeEvent(data: unknown): void {
-    this.updateState(data);
-  }
-
-  private updateState(raw: unknown): void {
-    const parsed = normalizeWindowsSessionState(raw);
-    if (!parsed) return;
-
-    if (
-      parsed.sequence < this.current.sequence ||
-      (parsed.sequence === this.current.sequence &&
-        parsed.sequence > 0 &&
-        parsed.observedAt < this.current.observedAt)
-    ) {
+    const parsed = normalizeWindowsSessionState(data);
+    if (!parsed || this.retiredObservers.has(parsed.observerId)) return;
+    if (!this.accepted || parsed.observerId !== this.accepted.observerId) {
+      // Only a response from the live pipe can establish a native instance.
+      void this.refreshState().then(() => {
+        // An older RPC may already have been in flight when this instance appeared.
+        if (this.accepted?.observerId !== parsed.observerId &&
+            !this.retiredObservers.has(parsed.observerId)) void this.refreshState();
+      });
       return;
     }
+    this.updateState(parsed);
+  }
 
-    this.current = parsed;
+  private updateState(raw: unknown, authoritative = false): void {
+    const parsed = normalizeWindowsSessionState(raw);
+    if (!parsed || this.retiredObservers.has(parsed.observerId)) return;
+    const previous = this.accepted;
+    if (previous && parsed.observerId !== previous.observerId) {
+      if (!authoritative) return;
+      this.retiredObservers.add(previous.observerId);
+      // Keep recent tombstones only. Evicted IDs still cannot change state via
+      // events: unfamiliar IDs must be confirmed by a status RPC on the live pipe.
+      if (this.retiredObservers.size > MAX_RETIRED_OBSERVERS) {
+        const oldest = this.retiredObservers.values().next().value;
+        if (oldest !== undefined) this.retiredObservers.delete(oldest);
+      }
+    } else if (previous) {
+      if (parsed.sequence < previous.sequence) return;
+      if (parsed.sequence === previous.sequence &&
+          JSON.stringify(parsed) !== JSON.stringify(previous)) return;
+    }
+    this.accepted = parsed;
+    this.publish(parsed);
+  }
+
+  private publish(state: WindowsSessionState): void {
+    if (JSON.stringify(state) === JSON.stringify(this.current)) return;
+    this.current = state;
+    this.revision++;
     for (const listener of this.listeners) {
       try {
         listener(this.currentState);
@@ -162,6 +206,11 @@ export function normalizeWindowsSessionState(
     displayPower,
     observedAt,
     sequence,
+    observerId: typeof record.observerId === "string" && record.observerId.length <= 64
+      ? record.observerId : "",
+    sessionMonitoring: record.sessionMonitoring === true,
+    displayPowerMonitoring: record.displayPowerMonitoring === true,
+    systemPowerMonitoring: record.systemPowerMonitoring === true,
   };
 }
 

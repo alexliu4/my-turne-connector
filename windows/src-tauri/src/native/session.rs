@@ -14,12 +14,16 @@ fn now_ms() -> u64 {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WindowsSessionState {
-    pub session: String,       // "locked" | "unlocked" | "unknown"
-    pub active_session: String,// "active" | "inactive" | "unknown"
-    pub system_power: String,  // "awake" | "suspending" | "resuming" | "unknown"
-    pub display_power: String, // "on" | "off" | "dimmed" | "unknown"
+    pub session: String,        // "locked" | "unlocked" | "unknown"
+    pub active_session: String, // "active" | "inactive" | "unknown"
+    pub system_power: String,   // "awake" | "suspending" | "resuming" | "unknown"
+    pub display_power: String,  // "on" | "off" | "dimmed" | "unknown"
     pub observed_at: u64,
     pub sequence: u64,
+    pub observer_id: String,
+    pub session_monitoring: bool,
+    pub display_power_monitoring: bool,
+    pub system_power_monitoring: bool,
 }
 
 impl Default for WindowsSessionState {
@@ -31,6 +35,10 @@ impl Default for WindowsSessionState {
             display_power: "unknown".to_string(),
             observed_at: now_ms(),
             sequence: 0,
+            observer_id: uuid::Uuid::new_v4().to_string(),
+            session_monitoring: false,
+            display_power_monitoring: false,
+            system_power_monitoring: false,
         }
     }
 }
@@ -50,6 +58,65 @@ impl SessionStateTracker {
         self.state.lock().unwrap().clone()
     }
 
+    pub fn set_monitoring(
+        &self,
+        session: bool,
+        display: bool,
+        system: bool,
+    ) -> Option<WindowsSessionState> {
+        let mut state = self.state.lock().unwrap();
+        let previous = state.clone();
+        state.session_monitoring = session;
+        state.display_power_monitoring = display;
+        state.system_power_monitoring = system;
+        if !session {
+            state.session = "unknown".into();
+            state.active_session = "unknown".into();
+        }
+        if !display {
+            state.display_power = "unknown".into();
+        }
+        if !system {
+            state.system_power = "unknown".into();
+        }
+        if *state == previous {
+            return None;
+        }
+        state.sequence += 1;
+        state.observed_at = now_ms();
+        Some(state.clone())
+    }
+
+    pub fn revalidate(
+        &self,
+        query: Option<(String, String)>,
+        resumed: bool,
+    ) -> Option<WindowsSessionState> {
+        let mut status = self.state.lock().unwrap();
+        let (session, active) = if status.session_monitoring {
+            query.unwrap_or_else(|| ("unknown".into(), "unknown".into()))
+        } else {
+            ("unknown".into(), "unknown".into())
+        };
+        let system = if status.system_power_monitoring {
+            if resumed || status.system_power == "unknown" {
+                "awake".to_string()
+            } else {
+                status.system_power.clone()
+            }
+        } else {
+            "unknown".to_string()
+        };
+        let clear_display = resumed || !status.display_power_monitoring;
+        Self::update_locked(
+            &mut status,
+            Some(&session),
+            Some(&active),
+            Some(&system),
+            if clear_display { Some("unknown") } else { None },
+        )
+    }
+
     pub fn update(
         &self,
         session: Option<&str>,
@@ -57,12 +124,34 @@ impl SessionStateTracker {
         system_power: Option<&str>,
         display_power: Option<&str>,
     ) -> Option<WindowsSessionState> {
-        let mut guard = self.state.lock().unwrap();
+        Self::update_locked(
+            &mut self.state.lock().unwrap(),
+            session,
+            active_session,
+            system_power,
+            display_power,
+        )
+    }
 
-        let new_session = session.map(|s| s.to_string()).unwrap_or_else(|| guard.session.clone());
-        let new_active = active_session.map(|s| s.to_string()).unwrap_or_else(|| guard.active_session.clone());
-        let new_system = system_power.map(|s| s.to_string()).unwrap_or_else(|| guard.system_power.clone());
-        let new_display = display_power.map(|s| s.to_string()).unwrap_or_else(|| guard.display_power.clone());
+    fn update_locked(
+        guard: &mut WindowsSessionState,
+        session: Option<&str>,
+        active_session: Option<&str>,
+        system_power: Option<&str>,
+        display_power: Option<&str>,
+    ) -> Option<WindowsSessionState> {
+        let new_session = session
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| guard.session.clone());
+        let new_active = active_session
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| guard.active_session.clone());
+        let new_system = system_power
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| guard.system_power.clone());
+        let new_display = display_power
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| guard.display_power.clone());
 
         if new_session == guard.session
             && new_active == guard.active_session
@@ -110,8 +199,6 @@ impl WindowsSessionObserver {
             *guard = Some(bridge.clone());
         }
 
-        self.revalidate_state();
-
         #[cfg(windows)]
         {
             let tracker = self.tracker.clone();
@@ -136,34 +223,10 @@ impl WindowsSessionObserver {
     pub fn revalidate_state(&self) {
         #[cfg(windows)]
         {
-            if let Some((sess_lock, sess_active)) = query_wts_session_status() {
-                if let Some(new_state) = self.tracker.update(
-                    Some(&sess_lock),
-                    Some(&sess_active),
-                    if self.tracker.get_status().system_power == "unknown" { Some("awake") } else { None },
-                    None,
-                ) {
-                    if let Ok(guard) = self.bridge.lock() {
-                        if let Some(ref bridge) = *guard {
-                            if let Ok(val) = serde_json::to_value(&new_state) {
-                                bridge.emit("windows.session.changed", val);
-                            }
-                        }
-                    }
-                }
-            } else {
-                if let Some(new_state) = self.tracker.update(
-                    Some("unknown"),
-                    Some("unknown"),
-                    None,
-                    None,
-                ) {
-                    if let Ok(guard) = self.bridge.lock() {
-                        if let Some(ref bridge) = *guard {
-                            if let Ok(val) = serde_json::to_value(&new_state) {
-                                bridge.emit("windows.session.changed", val);
-                            }
-                        }
+            if let Some(new_state) = self.tracker.revalidate(query_wts_session_status(), false) {
+                if let Ok(guard) = self.bridge.lock() {
+                    if let Some(ref bridge) = *guard {
+                        emit_state(bridge, Some(new_state));
                     }
                 }
             }
@@ -177,12 +240,29 @@ impl Default for WindowsSessionObserver {
     }
 }
 
+// SessionFlags is an exact LONG value, not a bit mask. UNKNOWN is -1.
+fn decode_wts_lock_state(level: u32, value: i32) -> &'static str {
+    match (level, value) {
+        (1, 0) => "locked",
+        (1, 1) => "unlocked",
+        _ => "unknown",
+    }
+}
+
+fn emit_state(bridge: &BridgeServer, state: Option<WindowsSessionState>) {
+    if let Some(state) = state {
+        if let Ok(value) = serde_json::to_value(state) {
+            bridge.emit("windows.session.changed", value);
+        }
+    }
+}
+
 #[cfg(windows)]
 fn query_wts_session_status() -> Option<(String, String)> {
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::RemoteDesktop::{
         ProcessIdToSessionId, WTSConnectState, WTSSessionInfoEx, WTS_CONNECTSTATE_CLASS,
-        WTS_CURRENT_SERVER_HANDLE, WTS_SESSIONSTATE_LOCK, WTS_SESSIONSTATE_UNLOCK,
+        WTS_CURRENT_SERVER_HANDLE,
     };
     use windows::Win32::System::Threading::GetCurrentProcessId;
 
@@ -205,6 +285,7 @@ fn query_wts_session_status() -> Option<(String, String)> {
         )
         .is_ok()
             && !buffer.is_null()
+            && bytes_returned as usize >= std::mem::size_of::<WTS_CONNECTSTATE_CLASS>()
         {
             let state_ptr = buffer as *const WTS_CONNECTSTATE_CLASS;
             let state = *state_ptr;
@@ -215,6 +296,9 @@ fn query_wts_session_status() -> Option<(String, String)> {
                 _ => "inactive".to_string(),
             }
         } else {
+            if !buffer.is_null() {
+                windows::Win32::System::RemoteDesktop::WTSFreeMemory(buffer);
+            }
             "unknown".to_string()
         };
 
@@ -230,21 +314,22 @@ fn query_wts_session_status() -> Option<(String, String)> {
         )
         .is_ok()
             && !buffer.is_null()
-            && bytes_returned as usize >= std::mem::size_of::<windows::Win32::System::RemoteDesktop::WTSINFOEXW>()
+            && bytes_returned as usize
+                >= std::mem::size_of::<windows::Win32::System::RemoteDesktop::WTSINFOEXW>()
         {
             let info_ptr = buffer as *const windows::Win32::System::RemoteDesktop::WTSINFOEXW;
             let info = &*info_ptr;
-            let flags = info.Data.WTSInfoExLevel1.SessionFlags;
-            windows::Win32::System::RemoteDesktop::WTSFreeMemory(buffer);
-
-            if (flags & WTS_SESSIONSTATE_LOCK as i32) != 0 {
-                "locked".to_string()
-            } else if flags == WTS_SESSIONSTATE_UNLOCK as i32 {
-                "unlocked".to_string()
+            let lock_state = if info.Level == 1 {
+                decode_wts_lock_state(info.Level, info.Data.WTSInfoExLevel1.SessionFlags)
             } else {
-                "unknown".to_string()
-            }
+                "unknown"
+            };
+            windows::Win32::System::RemoteDesktop::WTSFreeMemory(buffer);
+            lock_state.to_string()
         } else {
+            if !buffer.is_null() {
+                windows::Win32::System::RemoteDesktop::WTSFreeMemory(buffer);
+            }
             "unknown".to_string()
         };
 
@@ -289,7 +374,8 @@ fn run_win32_observer(tracker: Arc<SessionStateTracker>, bridge: BridgeServer) {
 
     const DEVICE_NOTIFY_WINDOW_HANDLE: u32 = 0x00000000;
 
-    const GUID_CONSOLE_DISPLAY_STATE: GUID = GUID::from_u128(0x6fe69556_9f77_4d61_91a3_8701028d510e);
+    const GUID_CONSOLE_DISPLAY_STATE: GUID =
+        GUID::from_u128(0x6fe69556_9f77_4d61_91a3_8701028d510e);
 
     struct StateCtx {
         tracker: Arc<SessionStateTracker>,
@@ -336,7 +422,8 @@ fn run_win32_observer(tracker: Arc<SessionStateTracker>, bridge: BridgeServer) {
                     let code = wparam.0 as u32;
                     if code == PBT_APMSUSPEND {
                         if let Some(new_state) =
-                            ctx.tracker.update(None, None, Some("suspending"), None)
+                            ctx.tracker
+                                .update(None, None, Some("suspending"), Some("unknown"))
                         {
                             if let Ok(val) = serde_json::to_value(&new_state) {
                                 ctx.bridge.emit("windows.session.changed", val);
@@ -351,27 +438,17 @@ fn run_win32_observer(tracker: Arc<SessionStateTracker>, bridge: BridgeServer) {
                             }
                         }
 
-                        let (sess_lock, sess_active) =
-                            query_wts_session_status().unzip();
-                        let sess_str = sess_lock.as_deref();
-                        let act_str = sess_active.as_deref();
-
-                        if let Some(new_state) = ctx.tracker.update(
-                            sess_str,
-                            act_str,
-                            Some("awake"),
-                            None,
-                        ) {
-                            if let Ok(val) = serde_json::to_value(&new_state) {
-                                ctx.bridge.emit("windows.session.changed", val);
-                            }
-                        }
+                        emit_state(
+                            &ctx.bridge,
+                            ctx.tracker.revalidate(query_wts_session_status(), true),
+                        );
                     } else if code == PBT_POWERSETTINGCHANGE && lparam.0 != 0 {
                         let setting = &*(lparam.0 as *const POWERBROADCAST_SETTING);
                         if setting.PowerSetting == GUID_CONSOLE_DISPLAY_STATE
-                            && setting.DataLength >= 1
+                            && setting.DataLength >= 4
                         {
-                            let raw_val = setting.Data[0];
+                            let raw_val =
+                                std::ptr::read_unaligned(setting.Data.as_ptr() as *const u32);
                             let disp = match raw_val {
                                 0 => "off",
                                 1 => "on",
@@ -403,7 +480,14 @@ fn run_win32_observer(tracker: Arc<SessionStateTracker>, bridge: BridgeServer) {
             ..Default::default()
         };
 
-        RegisterClassW(&wc);
+        if RegisterClassW(&wc) == 0 {
+            eprintln!(
+                "Windows session monitoring unavailable: window class registration failed: {}",
+                windows::core::Error::from_win32()
+            );
+            emit_state(&bridge, tracker.set_monitoring(false, false, false));
+            return;
+        }
 
         let hwnd = match CreateWindowExW(
             Default::default(),
@@ -420,7 +504,11 @@ fn run_win32_observer(tracker: Arc<SessionStateTracker>, bridge: BridgeServer) {
             None,
         ) {
             Ok(h) => h,
-            Err(_) => return,
+            Err(err) => {
+                eprintln!("Windows session monitoring unavailable: observer window creation failed: {err}");
+                emit_state(&bridge, tracker.set_monitoring(false, false, false));
+                return;
+            }
         };
 
         let ctx = Box::new(StateCtx {
@@ -435,22 +523,52 @@ fn run_win32_observer(tracker: Arc<SessionStateTracker>, bridge: BridgeServer) {
             ctx_ptr as isize,
         );
 
-        let _ = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+        let session_registration = WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION);
+        if let Err(ref err) = session_registration {
+            eprintln!("Windows session monitoring unavailable: WTS registration failed: {err}");
+        }
         let pwr_handle = RegisterPowerSettingNotification(
             HANDLE(hwnd.0),
             &GUID_CONSOLE_DISPLAY_STATE,
-            windows::Win32::UI::WindowsAndMessaging::REGISTER_NOTIFICATION_FLAGS(DEVICE_NOTIFY_WINDOW_HANDLE),
+            windows::Win32::UI::WindowsAndMessaging::REGISTER_NOTIFICATION_FLAGS(
+                DEVICE_NOTIFY_WINDOW_HANDLE,
+            ),
+        );
+
+        if let Err(ref err) = pwr_handle {
+            eprintln!("Windows display-power monitoring unavailable: registration failed: {err}");
+        }
+        emit_state(
+            &bridge,
+            tracker.set_monitoring(session_registration.is_ok(), pwr_handle.is_ok(), true),
+        );
+        emit_state(
+            &bridge,
+            tracker.revalidate(query_wts_session_status(), false),
         );
 
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+        loop {
+            let result = GetMessageW(&mut msg, None, 0, 0).0;
+            if result <= 0 {
+                if result < 0 {
+                    eprintln!(
+                        "Windows session monitoring stopped: {}",
+                        windows::core::Error::from_win32()
+                    );
+                }
+                break;
+            }
             DispatchMessageW(&msg);
         }
+        emit_state(&bridge, tracker.set_monitoring(false, false, false));
 
         if let Ok(h) = pwr_handle {
             let _ = UnregisterPowerSettingNotification(h);
         }
-        let _ = WTSUnRegisterSessionNotification(hwnd);
+        if session_registration.is_ok() {
+            let _ = WTSUnRegisterSessionNotification(hwnd);
+        }
         let _ = DestroyWindow(hwnd);
         let _ = Box::from_raw(ctx_ptr);
     }
@@ -459,6 +577,78 @@ fn run_win32_observer(tracker: Arc<SessionStateTracker>, bridge: BridgeServer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wts_lock_values_are_exact_and_require_level_one() {
+        assert_eq!(decode_wts_lock_state(1, 0), "locked");
+        assert_eq!(decode_wts_lock_state(1, 1), "unlocked");
+        for value in [-1, 2, 3, i32::MIN, i32::MAX] {
+            assert_eq!(decode_wts_lock_state(1, value), "unknown");
+        }
+        assert_eq!(decode_wts_lock_state(0, 0), "unknown");
+        assert_eq!(decode_wts_lock_state(2, 1), "unknown");
+    }
+
+    #[test]
+    fn reconnect_query_while_locked_returns_locked() {
+        let tracker = SessionStateTracker::new();
+        tracker.set_monitoring(true, true, true);
+        tracker.revalidate(
+            Some((decode_wts_lock_state(1, 0).into(), "active".into())),
+            false,
+        );
+        assert_eq!(tracker.get_status().session, "locked");
+    }
+
+    #[test]
+    fn observers_have_distinct_stable_ids() {
+        let first = SessionStateTracker::new();
+        let second = SessionStateTracker::new();
+        assert_ne!(
+            first.get_status().observer_id,
+            second.get_status().observer_id
+        );
+        let id = first.get_status().observer_id;
+        first.update(Some("locked"), None, None, None);
+        assert_eq!(first.get_status().observer_id, id);
+    }
+
+    #[test]
+    fn registration_failures_are_independent_and_clear_stale_state() {
+        let tracker = SessionStateTracker::new();
+        tracker.set_monitoring(true, true, true);
+        tracker.update(Some("locked"), Some("active"), Some("awake"), Some("on"));
+        let state = tracker.set_monitoring(false, true, true).unwrap();
+        assert!(!state.session_monitoring);
+        assert_eq!(state.session, "unknown");
+        assert_eq!(state.active_session, "unknown");
+        assert_eq!(state.display_power, "on");
+        tracker.revalidate(Some(("unlocked".into(), "active".into())), false);
+        assert_eq!(tracker.get_status().session, "unknown");
+        let state = tracker.set_monitoring(true, false, true).unwrap();
+        assert!(!state.display_power_monitoring);
+        assert_eq!(state.display_power, "unknown");
+        assert!(state.system_power_monitoring);
+        let state = tracker.set_monitoring(false, false, false).unwrap();
+        assert_eq!(state.system_power, "unknown");
+    }
+
+    #[test]
+    fn failed_resume_query_clears_session_and_display() {
+        let tracker = SessionStateTracker::new();
+        tracker.set_monitoring(true, true, true);
+        tracker.update(
+            Some("locked"),
+            Some("active"),
+            Some("suspending"),
+            Some("off"),
+        );
+        let state = tracker.revalidate(None, true).unwrap();
+        assert_eq!(state.session, "unknown");
+        assert_eq!(state.active_session, "unknown");
+        assert_eq!(state.display_power, "unknown");
+        assert_eq!(state.system_power, "awake");
+    }
 
     #[test]
     fn initial_state_is_unknown() {
@@ -474,7 +664,9 @@ mod tests {
     #[test]
     fn lock_and_unlock_updates_sequence() {
         let tracker = SessionStateTracker::new();
-        let s1 = tracker.update(Some("locked"), Some("active"), Some("awake"), Some("on")).unwrap();
+        let s1 = tracker
+            .update(Some("locked"), Some("active"), Some("awake"), Some("on"))
+            .unwrap();
         assert_eq!(s1.session, "locked");
         assert_eq!(s1.sequence, 1);
 
@@ -516,13 +708,17 @@ mod tests {
         let tracker = SessionStateTracker::new();
         let _ = tracker.update(Some("unlocked"), Some("active"), Some("awake"), Some("on"));
 
-        let s1 = tracker.update(None, None, Some("suspending"), None).unwrap();
+        let s1 = tracker
+            .update(None, None, Some("suspending"), None)
+            .unwrap();
         assert_eq!(s1.system_power, "suspending");
 
         let s2 = tracker.update(None, None, Some("resuming"), None).unwrap();
         assert_eq!(s2.system_power, "resuming");
 
-        let s3 = tracker.update(Some("unlocked"), Some("active"), Some("awake"), Some("on")).unwrap();
+        let s3 = tracker
+            .update(Some("unlocked"), Some("active"), Some("awake"), Some("on"))
+            .unwrap();
         assert_eq!(s3.system_power, "awake");
     }
 
@@ -551,7 +747,9 @@ mod tests {
         let tracker = SessionStateTracker::new();
         let _ = tracker.update(Some("locked"), Some("active"), Some("awake"), Some("on"));
 
-        let s1 = tracker.update(Some("unknown"), Some("unknown"), None, None).unwrap();
+        let s1 = tracker
+            .update(Some("unknown"), Some("unknown"), None, None)
+            .unwrap();
         assert_eq!(s1.session, "unknown");
         assert_eq!(s1.active_session, "unknown");
     }

@@ -57,3 +57,8 @@ impl NativeServices {
         }
     }
 }
+
+// Exercise the platform-independent session reducer on non-Windows hosts too.
+#[cfg(all(test, not(windows)))]
+#[path = "native/session.rs"]
+mod session_tests;
