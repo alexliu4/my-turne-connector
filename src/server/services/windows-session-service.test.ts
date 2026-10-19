@@ -322,3 +322,137 @@ describe("WindowsSessionService & Integration", () => {
     expect((res.result as any).sessionState.session).toBe("unknown");
   });
 });
+
+describe("native observer generations and availability", () => {
+  const snapshot = (observerId: string, sequence: number, session = "locked") => ({
+    observerId, sequence, session, activeSession: "active", systemPower: "awake",
+    displayPower: "on", observedAt: sequence * 100,
+    sessionMonitoring: true, displayPowerMonitoring: true, systemPowerMonitoring: true,
+  });
+
+  test("startup RPC is authoritative; exact duplicates and equal-sequence conflicts are ignored", async () => {
+    const state = snapshot("host-a", 20);
+    const bridge = new FakeHostBridge(() => state);
+    const service = new WindowsSessionService(bridge, "win32");
+    const changes: WindowsSessionState[] = [];
+    service.onSessionChanged(value => changes.push(value));
+    await service.start();
+    bridge.emitNativeEvent("windows.session.changed", state);
+    bridge.emitNativeEvent("windows.session.changed", { ...state, session: "unlocked", observedAt: 99999 });
+    expect(changes).toHaveLength(1);
+    expect(service.currentState.session).toBe("locked");
+  });
+
+  test("native restart accepts lower sequence only from live snapshot and rejects delayed old instance", async () => {
+    let live = snapshot("host-a", 100, "unlocked");
+    const bridge = new FakeHostBridge(() => live);
+    const service = new WindowsSessionService(bridge, "win32");
+    await service.start();
+    live = snapshot("host-b", 1);
+    bridge.emitNativeEvent("windows.session.changed", live);
+    expect(service.currentState.observerId).toBe("host-a");
+    await service.refreshState();
+    expect(service.currentState.observerId).toBe("host-b");
+    expect(service.currentState.sequence).toBe(1);
+    expect(service.currentState.session).toBe("locked");
+    const calls = bridge.calls.length;
+    bridge.emitNativeEvent("windows.session.changed", snapshot("host-a", 999, "unlocked"));
+    expect(service.currentState.session).toBe("locked");
+    expect(bridge.calls).toHaveLength(calls);
+    bridge.emitNativeEvent("windows.session.changed", snapshot("host-c", 999, "unlocked"));
+    await service.refreshState();
+    expect(service.currentState.observerId).toBe("host-b");
+  });
+
+  test("pipe failure clears stale authority, same-instance reconnect restores locked snapshot", async () => {
+    const state = snapshot("host-a", 10);
+    const bridge = new FakeHostBridge(() => state);
+    const service = new WindowsSessionService(bridge, "win32");
+    await service.start();
+    bridge.setSessionStatusHandler(() => { throw new Error("disconnected"); });
+    await service.refreshState();
+    expect(service.currentState.session).toBe("unknown");
+    expect(service.currentState.displayPower).toBe("unknown");
+    expect(service.currentState.sessionMonitoring).toBe(false);
+    bridge.emitNativeEvent("windows.session.changed", snapshot("host-a", 9, "unlocked"));
+    expect(service.currentState.session).toBe("unknown");
+    bridge.setSessionStatusHandler(() => state);
+    await service.refreshState();
+    expect(service.currentState.session).toBe("locked");
+    expect(service.currentState.sessionMonitoring).toBe(true);
+    const replacement = new WindowsSessionService(bridge, "win32");
+    await replacement.start();
+    expect(replacement.currentState.session).toBe("locked");
+    expect(replacement.currentState.observerId).toBe("host-a");
+  });
+
+  test("delayed failed refresh cannot erase a newer event; overlapping refreshes single-flight", async () => {
+    const bridge = new FakeHostBridge(() => snapshot("host-a", 1));
+    const service = new WindowsSessionService(bridge, "win32");
+    await service.start();
+    let fail!: (error: Error) => void;
+    bridge.setSessionStatusHandler(() => new Promise((_, reject) => { fail = reject; }));
+    const first = service.refreshState();
+    const second = service.refreshState();
+    bridge.emitNativeEvent("windows.session.changed", snapshot("host-a", 2));
+    fail(new Error("late failure"));
+    await Promise.all([first, second]);
+    expect(bridge.calls).toHaveLength(2);
+    expect(service.currentState.session).toBe("locked");
+    expect(service.currentState.sequence).toBe(2);
+  });
+
+  test("monitoring failure is reported without affecting other fields; Linux stays unsupported", async () => {
+    const state = { ...snapshot("host-a", 1), sessionMonitoring: false, session: "unknown", activeSession: "unknown" };
+    const bridge = new FakeHostBridge(() => state);
+    const service = new WindowsSessionService(bridge, "win32");
+    await service.start();
+    expect(service.currentState.sessionMonitoring).toBe(false);
+    expect(service.currentState.displayPowerMonitoring).toBe(true);
+    expect(service.currentState.displayPower).toBe("on");
+    const linux = new WindowsSessionService(bridge, "linux");
+    const calls = bridge.calls.length;
+    await linux.start();
+    await linux.refreshState();
+    expect(linux.isAvailable).toBe(false);
+    expect(bridge.calls).toHaveLength(calls);
+    const manager = new NocturneManager({ platform: "linux", bluetoothService: createUnavailableBluetoothService() });
+    const response = await manager.onCall("1", "windows.session.get_status", {});
+    expect((response.result as any).status).toBe("unsupported");
+  });
+});
+
+
+test("app.ready revalidates a locked reconnect rather than replaying an unlocked cache", async () => {
+  let state = { observerId: "host-a", sequence: 1, observedAt: 100, session: "unlocked" };
+  const bridge = new FakeHostBridge(() => state);
+  const service = new WindowsSessionService(bridge, "win32");
+  await service.start();
+  state = { ...state, sequence: 2, observedAt: 200, session: "locked" };
+  const manager = new NocturneManager({ platform: "win32", hostBridge: bridge,
+    windowsSessionService: service, bluetoothService: createUnavailableBluetoothService() });
+  let ready: any;
+  (manager as any).broadcastToDevices = async (topic: string, data: unknown) => {
+    if (topic === "app.ready") ready = data;
+  };
+  await (manager as any).sendAppReady();
+  expect(ready.windowsSession.session).toBe("locked");
+  expect(ready.windowsSession.sequence).toBe(2);
+  expect(ready.platform).toBe("web");
+});
+
+test("a new-instance event arriving during an older refresh gets a follow-up live snapshot", async () => {
+  const bridge = new FakeHostBridge(() => ({ observerId: "host-a", sequence: 100, observedAt: 100, session: "unlocked" }));
+  const service = new WindowsSessionService(bridge, "win32");
+  await service.start();
+  let finish!: (value: unknown) => void;
+  bridge.setSessionStatusHandler(() => new Promise(resolve => { finish = resolve; }));
+  const pending = service.refreshState();
+  bridge.emitNativeEvent("windows.session.changed", { observerId: "host-b", sequence: 1, session: "locked" });
+  bridge.setSessionStatusHandler(() => ({ observerId: "host-b", sequence: 1, observedAt: 200, session: "locked" }));
+  finish({ observerId: "host-a", sequence: 100, observedAt: 100, session: "unlocked" });
+  await pending;
+  await service.refreshState();
+  expect(service.currentState.observerId).toBe("host-b");
+  expect(service.currentState.session).toBe("locked");
+});

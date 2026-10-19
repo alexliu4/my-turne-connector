@@ -14,6 +14,10 @@ interface WindowsSessionState {
   displayPower: "on" | "off" | "dimmed" | "unknown";
   observedAt: number;
   sequence: number;
+  observerId: string;
+  sessionMonitoring: boolean;
+  displayPowerMonitoring: boolean;
+  systemPowerMonitoring: boolean;
 }
 ```
 
@@ -24,7 +28,9 @@ interface WindowsSessionState {
 - **`systemPower`**: System suspend/resume power status (`awake`, `suspending`, `resuming`, or `unknown`).
 - **`displayPower`**: Console display power state (`on`, `off`, `dimmed`, or `unknown`).
 - **`observedAt`**: Timestamp in Unix epoch milliseconds when the state change occurred.
-- **`sequence`**: Monotonically increasing sequence integer. Increments **only** when effective state changes.
+- **`sequence`**: Monotonically increasing within one observer instance. Increments only when effective state or monitoring availability changes.
+- **`observerId`**: Random UUID generated once per native observer lifetime. A host restart creates a new ID and may reset sequence to zero. It contains no OS identity.
+- **`sessionMonitoring`**, **`displayPowerMonitoring`**, **`systemPowerMonitoring`**: Whether WTS notifications, display-power notifications, and the power-message window respectively are available. All default to false; unavailable sources have unknown state fields. A registered source can still report unknown when its query fails.
 
 ## 2. Native Windows Signal Sources
 
@@ -35,6 +41,7 @@ The Rust native host (`windows/src-tauri/src/native/session.rs`) observes Win32 
   - `WTS_SESSION_UNLOCK` -> `session: "unlocked"`
   - `WTS_CONSOLE_CONNECT`, `WTS_REMOTE_CONNECT`, `WTS_SESSION_LOGON` -> `activeSession: "active"`
   - `WTS_CONSOLE_DISCONNECT`, `WTS_REMOTE_DISCONNECT`, `WTS_SESSION_LOGOFF` -> `activeSession: "inactive"`
+- **Lock decoding**: `SessionFlags` is decoded by exact value: `0` is locked, `1` is unlocked, `0xFFFFFFFF` and every other value are unknown. Only `WTSINFOEXW.Level == 1` is read; truncated responses are unknown. See [Microsoft WTS session values](https://learn.microsoft.com/en-us/windows/win32/api/wtsapi32/ns-wtsapi32-wtsinfoex_level1_w).
 - **Initial & Snapshot Queries**: `WTSQuerySessionInformationW` querying `WTSConnectState` and `WTSSessionInfoEx` (`WTSINFOEXW`).
 - **System Power Events**: `WM_POWERBROADCAST`:
   - `PBT_APMSUSPEND` -> `systemPower: "suspending"`
@@ -57,7 +64,9 @@ The Rust native host (`windows/src-tauri/src/native/session.rs`) observes Win32 
 
 ## 4. Unknown-State Behavior & Fallback Guarantees
 
-- If OS queries, listener registrations, or session state determination fails, state fields evaluate explicitly to `"unknown"`.
+- WTS and display registration results are checked independently and logged on failure. A failed WTS registration clears session and active-session state; a failed display registration clears display state. Window creation or message-loop failure clears all monitoring availability and state. None of these failures abort other native services.
+- Failed WTS revalidation clears both session fields, including on resume. Resume invalidates cached display power until the next display notification; no current-display query is invented.
+- A failed native snapshot RPC clears Bun's exposed state and monitoring availability. Ordering metadata is retained separately so delayed events cannot restore stale authority; the same current snapshot can restore availability after reconnect. A failed older RPC does not erase a newer event.
 - `awake`, `unlocked`, or `active` are never invented when a query fails.
 - On startup, resume, or sidecar reconnection, state is explicitly revalidated rather than assuming stale cached values remain accurate.
 
@@ -65,7 +74,9 @@ The Rust native host (`windows/src-tauri/src/native/session.rs`) observes Win32 
 
 - The Rust native host maintains the authoritative in-memory snapshot.
 - Duplicate or noisy OS notifications produce no sequence increments and no duplicate events.
-- Sequence counter checks ensure delayed or out-of-order native events cannot overwrite newer snapshot state in the Bun sidecar or Car Thing.
+- Ordering uses `(observerId, sequence)`. Only an authoritative status RPC from the live native pipe can establish a different observer ID. An event with an unfamiliar ID triggers a single-flight status refresh rather than changing authority itself. Retired-instance events and snapshots are rejected, regardless of their sequence or wall clock.
+- Within an instance, lower sequences and conflicting equal sequences are ignored. Exact duplicates produce no sidecar event. Consumers comparing sequences must scope them to `observerId`; sequence alone is not globally monotonic.
+- Missing observer IDs are treated as a legacy instance (`""`) for compatibility. New hosts always supply the UUID. Missing monitoring fields default to false.
 - On Bun sidecar restart or Car Thing reconnect, the latest authoritative snapshot is retrieved directly via RPC (`windows.session.get_status`).
 
 ## 6. Independence from Bluetooth Connectivity & Media Controls
@@ -114,3 +125,15 @@ The following matrix distinguishes behavior verified by automated unit/integrati
 ## 9. Outstanding G0 Dependencies
 
 G0 physical hardware reliability acceptance is independent of Sprint 13. While Sprint 13 provides accurate OS status and events over the native bridge, physical Bluetooth recovery and hardware display behavior require manual testing on physical Car Thing and Windows hardware.
+
+## 10. Re-review Validation and Physical Steps
+
+Automated regression coverage includes exact lock values and unsupported levels, a locked reconnect query, independent registration failures, failed resume queries, distinct native observer IDs, lower-sequence native restarts, delayed retired-instance events, duplicate snapshots, sidecar restart/reconnection, and an older failed RPC racing a newer event. The session reducer tests also run on non-Windows Cargo hosts; Windows CI compiles and tests the actual Win32 observer.
+
+Physical Windows validation remains required (automated tests do not claim hardware acceptance):
+
+1. Install the Windows CI installer. With an RFCOMM Car Thing route active, use Win+L, reconnect the Car Thing while still locked, and inspect `windows.session.get_status`: expect `session: "locked"` and a stable observer ID. Unlock and expect a higher sequence with `unlocked`.
+2. Restart only the Bun sidecar while locked. Expect the same native observer ID and current locked snapshot. Then restart the full native host while Bun remains connected in a development harness; expect a new ID with a potentially lower sequence accepted after the status RPC. Inject a queued event with the old ID and verify it is ignored.
+3. Test display timeout and sleep/resume. Resume must not reuse the old display value before a fresh notification. If WTS query failure is injected during resume, both session fields must become unknown.
+4. In a debug build, force WTS registration failure and display registration failure separately. Verify the matching monitoring flag is false, affected state is unknown, and a diagnostic is logged. Force observer window/message-loop failure and confirm all monitoring becomes unavailable. Restore monitoring by restarting the host.
+5. During each failure and lock transition, exercise Spotify, volume, media controls, Bluetooth pairing/reconnect, and Windows-to-Mac fallback. Session observation must not alter route ownership or fallback decisions. No device backlight behavior is implemented in this sprint.
