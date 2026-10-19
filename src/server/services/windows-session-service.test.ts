@@ -456,3 +456,65 @@ test("a new-instance event arriving during an older refresh gets a follow-up liv
   expect(service.currentState.observerId).toBe("host-b");
   expect(service.currentState.session).toBe("locked");
 });
+
+
+test("observer history stays bounded across restarts without trusting evicted events", async () => {
+  const snapshot = (index: number) => ({
+    observerId: `host-${index}`, sequence: index % 2, observedAt: index,
+    session: index % 2 === 0 ? "locked" : "unlocked",
+  });
+  let live = snapshot(0);
+  const bridge = new FakeHostBridge(() => live);
+  const service = new WindowsSessionService(bridge, "win32");
+  const retired = () => (service as unknown as { retiredObservers: Set<string> }).retiredObservers;
+  const changes: WindowsSessionState[] = [];
+  service.onSessionChanged(state => changes.push(state));
+  await service.start();
+
+  for (let index = 1; index <= 64; index++) {
+    live = snapshot(index);
+    bridge.emitNativeEvent("windows.session.changed", live);
+    // A new generation's event alone never establishes authority.
+    expect(service.currentState.observerId).toBe(`host-${index - 1}`);
+    await service.refreshState();
+    expect(service.currentState.observerId).toBe(live.observerId);
+    expect(service.currentState.sequence).toBe(live.sequence);
+    expect(retired().size).toBe(Math.min(index, 16));
+  }
+  expect(retired().has("host-0")).toBe(false);
+  expect(retired().has("host-48")).toBe(true);
+  expect(retired().has("host-63")).toBe(true);
+  expect(retired().has("host-64")).toBe(false);
+
+  const current = service.currentState;
+  const changeCount = changes.length;
+  const calls = bridge.calls.length;
+  // Recent tombstones reject even events with a much higher sequence/time.
+  bridge.emitNativeEvent("windows.session.changed", {
+    ...snapshot(63), sequence: 99999, observedAt: 99999,
+  });
+  expect(bridge.calls).toHaveLength(calls);
+
+  // Evicted tombstones are no longer remembered, but their event data remains
+  // untrusted. Revalidate against host-64 instead of adopting the old payload.
+  for (let index = 0; index < 64; index++) {
+    bridge.emitNativeEvent("windows.session.changed", {
+      ...snapshot(index), session: "unlocked", sequence: 99999, observedAt: 99999,
+    });
+    expect(service.currentState).toEqual(current);
+  }
+  await service.refreshState();
+  await service.refreshState(); // drain any follow-up refresh from an in-flight RPC
+  expect(service.currentState).toEqual(current);
+  expect(changes).toHaveLength(changeCount);
+  expect(retired().size).toBe(16);
+
+  // A real restart after eviction still adopts its authoritative reset sequence.
+  live = snapshot(65);
+  await service.refreshState();
+  expect(service.currentState.observerId).toBe("host-65");
+  expect(service.currentState.session).toBe("unlocked");
+  expect(retired().size).toBe(16);
+  expect(retired().has("host-48")).toBe(false);
+  expect(retired().has("host-64")).toBe(true);
+});

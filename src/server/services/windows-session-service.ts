@@ -2,6 +2,7 @@ import type { HostBridgeClient } from "../platform/host-bridge";
 import { createLogger } from "../utils/logger";
 
 const log = createLogger("WindowsSessionService");
+const MAX_RETIRED_OBSERVERS = 16;
 
 export interface WindowsSessionState {
   session: "locked" | "unlocked" | "unknown";
@@ -121,6 +122,12 @@ export class WindowsSessionService {
     if (previous && parsed.observerId !== previous.observerId) {
       if (!authoritative) return;
       this.retiredObservers.add(previous.observerId);
+      // Keep recent tombstones only. Evicted IDs still cannot change state via
+      // events: unfamiliar IDs must be confirmed by a status RPC on the live pipe.
+      if (this.retiredObservers.size > MAX_RETIRED_OBSERVERS) {
+        const oldest = this.retiredObservers.values().next().value;
+        if (oldest !== undefined) this.retiredObservers.delete(oldest);
+      }
     } else if (previous) {
       if (parsed.sequence < previous.sequence) return;
       if (parsed.sequence === previous.sequence &&
