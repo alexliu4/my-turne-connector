@@ -40,6 +40,10 @@ import { AppLaunchService } from "./services/app-launch-service";
 import { MacroService } from "./services/macro-service";
 import type { AppLaunchPreferenceStore } from "./services/app-launch-config";
 import type { MacroPreferenceStore } from "./services/macro-config";
+import {
+  WindowsSessionService,
+  defaultWindowsSessionState,
+} from "./services/windows-session-service";
 
 const log = createLogger("NocturneManager");
 const KEEP_ALIVE_RPC_TIMEOUT_MS = 5_000;
@@ -144,6 +148,7 @@ export interface NocturneManagerDependencies {
   appLaunchPreferenceStore?: AppLaunchPreferenceStore;
   macroPreferenceStore?: MacroPreferenceStore;
   carThingOtaService?: CarThingOTAService;
+  windowsSessionService?: WindowsSessionService;
 }
 
 export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDelegate {
@@ -162,6 +167,7 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
   readonly systemStatsService: SystemStatsService | null;
   readonly appLaunchService: AppLaunchService | null;
   readonly macroService: MacroService | null;
+  readonly windowsSessionService: WindowsSessionService | null;
 
   private connections = new Map<string, DeviceConnection>();
   private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -220,6 +226,11 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
           dependencies.appLaunchPreferenceStore,
         )
       : null;
+    this.windowsSessionService =
+      dependencies.windowsSessionService ??
+      (dependencies.hostBridge
+        ? new WindowsSessionService(dependencies.hostBridge, this.platform)
+        : null);
     this.macroService = dependencies.hostBridge
       ? new MacroService(
           dependencies.hostBridge,
@@ -322,6 +333,15 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
     if (this.macroService) {
       void this.macroService.start().catch((err) => {
         log.warn(`Background macro detection failed: ${errorMessage(err)}`);
+      });
+    }
+    if (this.windowsSessionService) {
+      this.windowsSessionService.onSessionChanged((sessionState) => {
+        this.broadcastToDevices("windows.session.changed", sessionState);
+        this.broadcastToWebSocket("windows.session.changed", sessionState);
+      });
+      void this.windowsSessionService.start().catch((err) => {
+        log.warn(`Background Windows session service start failed: ${errorMessage(err)}`);
       });
     }
     await this.bluetoothService.initialize();
@@ -584,6 +604,8 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
 
     if (this.platform === "win32") {
       appReadyPayload.connectorPlatform = "windows";
+      appReadyPayload.windowsSession =
+        await this.windowsSessionService?.refreshState() ?? defaultWindowsSessionState();
     }
 
     appReadyPayload.capabilities = this.getCapabilities();
@@ -882,6 +904,28 @@ export class NocturneManager implements RPCClientDelegate, SpotifyWebSocketDeleg
         if (!this.macroService) return { result: { status: "unsupported", available: false } };
         const res = await this.macroService.getStatus();
         return { result: res };
+      }
+
+      if (
+        method === "windows.session.get_status" ||
+        method === "session.get_status" ||
+        method === "windows_session.get_status"
+      ) {
+        if (!this.windowsSessionService || this.platform !== "win32") {
+          return {
+            result: {
+              status: "unsupported",
+              sessionState: defaultWindowsSessionState(),
+            },
+          };
+        }
+        const sessionState = await this.windowsSessionService.refreshState();
+        return {
+          result: {
+            status: "ok",
+            sessionState,
+          },
+        };
       }
 
       if (

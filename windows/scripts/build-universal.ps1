@@ -1,6 +1,8 @@
 $ErrorActionPreference = "Stop"
 
 $windowsRoot = Split-Path -Parent $PSScriptRoot
+. (Join-Path $PSScriptRoot "nsis.ps1")
+$nsisPath = Find-NsisCompiler -Required
 $targetRoot = Join-Path $windowsRoot "build"
 $x64Root = Join-Path $targetRoot "x64"
 $arm64Root = Join-Path $targetRoot "arm64"
@@ -137,31 +139,6 @@ if (-not $x64Only) {
       throw "Required ARM64 component missing prior to installer packaging: $file"
     }
   }
-}
-
-$nsis = Get-Command makensis -ErrorAction SilentlyContinue
-if ($null -eq $nsis) {
-  $candidatePaths = @(
-    (Join-Path ${env:ProgramFiles(x86)} "NSIS\makensis.exe"),
-    (Join-Path $env:ProgramFiles "NSIS\makensis.exe"),
-    "C:\Program Files (x86)\NSIS\makensis.exe",
-    "C:\Program Files\NSIS\makensis.exe",
-    "C:\ProgramData\chocolatey\bin\makensis.exe"
-  )
-  foreach ($path in $candidatePaths) {
-    if ($path -and (Test-Path $path)) {
-      $nsis = Get-Item $path
-      break
-    }
-  }
-}
-if ($null -eq $nsis) {
-  throw "makensis is required to build the setup executable."
-}
-$nsisPath = if ($nsis.PSObject.Properties.Name -contains "Source") {
-  $nsis.Source
-} else {
-  $nsis.FullName
 }
 
 $version = if ($env:NOCTURNE_CONNECTOR_VERSION) { $env:NOCTURNE_CONNECTOR_VERSION } else { "2.1.4" }

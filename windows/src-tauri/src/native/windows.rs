@@ -12,6 +12,8 @@ mod macros;
 mod security;
 #[path = "system_stats.rs"]
 mod system_stats;
+#[path = "session.rs"]
+mod session;
 
 use crate::bridge::BridgeServer;
 use serde_json::Value;
@@ -24,6 +26,7 @@ pub struct WindowsNativeState {
     system_stats: Arc<system_stats::WindowsSystemStatsState>,
     app_launch: Arc<app_launch::WindowsAppLaunchState>,
     macros: Arc<macros::WindowsMacroState>,
+    session: Arc<session::WindowsSessionObserver>,
 }
 
 impl WindowsNativeState {
@@ -35,16 +38,22 @@ impl WindowsNativeState {
             system_stats: Arc::new(system_stats::WindowsSystemStatsState::new()),
             app_launch: Arc::new(app_launch::WindowsAppLaunchState::new()),
             macros: Arc::new(macros::WindowsMacroState::new()),
+            session: Arc::new(session::WindowsSessionObserver::new()),
         }
     }
 
     pub async fn start(&self, bridge: BridgeServer) {
+        self.session.start(bridge.clone()).await;
         self.bluetooth.start(bridge.clone()).await;
         self.media.start(bridge).await;
     }
 
     pub async fn replay(&self, bridge: &BridgeServer) {
         self.media.replay(bridge);
+        let status = self.session.get_status();
+        if let Ok(val) = serde_json::to_value(&status) {
+            bridge.emit("windows.session.changed", val);
+        }
     }
 
     pub fn reset_routes(&self) {
@@ -85,6 +94,12 @@ impl WindowsNativeState {
                 .dispatch(bridge, &self.app_launch, &self.media, method, params)
                 .await;
         }
+        if method.starts_with("windows.session.")
+            || method.starts_with("session.")
+            || method.starts_with("windows_session.")
+        {
+            return self.session.dispatch(method, params).await;
+        }
         if method == "security.protect" {
             let value = params
                 .get("value")
@@ -113,5 +128,13 @@ mod tests {
         let bridge = BridgeServer::new("token".to_string());
         let list_res = state.dispatch(&bridge, "audio.outputs.list", Value::Null).await;
         assert!(list_res.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dispatches_session_methods_to_session_state() {
+        let state = WindowsNativeState::new();
+        let bridge = BridgeServer::new("token".to_string());
+        let res = state.dispatch(&bridge, "windows.session.get_status", Value::Null).await;
+        assert!(res.is_ok());
     }
 }
